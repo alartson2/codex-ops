@@ -1,0 +1,23 @@
+[Unit]
+Description=Codex Ops Telegram Bot
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=codexops
+Group=codexops
+WorkingDirectory=/opt/codex-ops
+Environment=HOME=/var/lib/codexops
+Environment=CODEX_HOME=/var/lib/codexops/.codex
+EnvironmentFile=/etc/codex-ops/bot.env
+ExecStart=/usr/bin/node /opt/codex-ops/bot.mjs
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/codex-ops /var/lib/codexops /srv/codex-ops/incidents
+
+[Install]
+WantedBy=multi-user.target
