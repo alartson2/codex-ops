@@ -36,7 +36,7 @@ The goal is not to replace SSH completely. The goal is to make the common loop f
 - Codex CLI integration (`codex exec`) for investigations and Q/A
 - Native subscription device auth flow (`/codex login`)
 - Persistent lightweight chat state and project-aware context
-- Out-of-the-box server-side memory files (`CHANGELOG.md`, project `NOTES.md`, context, and runbooks)
+- Out-of-the-box project memory files (`CHANGELOG.md`, `NOTES.md`, context, and runbooks)
 - OpenClaw-focused diagnostics and incident note generation
 - Periodic progress updates for long-running Codex tasks
 - Telegram HTML rendering for Codex Markdown output
@@ -49,7 +49,7 @@ The goal is not to replace SSH completely. The goal is to make the common loop f
 - Production-adjacent test loops: change code, run commands, inspect service state, and verify behavior against real containers, ports, files, and systemd units.
 - Out-of-band incident response: keep a host-level assistant available even when the OpenClaw application layer or container runtime is degraded.
 - Long-running remote work: start larger Codex tasks from Telegram and receive periodic "Codex progress update" messages until the final answer arrives.
-- Shared operational memory: keep lightweight project context, runbooks, incident notes, and a global changelog on the server instead of scattering them across local machines.
+- Shared operational memory: keep lightweight project context, runbooks, incident notes, and project changelogs on the server instead of scattering them across local machines.
 - Native Codex subscription auth on headless hosts: start device login from Telegram and complete browser confirmation elsewhere.
 - Safer Telegram output: convert Codex Markdown to Telegram-native formatting while limiting message chunks and avoiding raw stdout/stderr floods.
 

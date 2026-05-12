@@ -53,7 +53,7 @@ This helps with work such as:
 - multi-step diagnostics
 - OpenClaw agent setup
 - deployment audits
-- changelog or documentation generation from live server context
+- project changelog or documentation generation from live server context
 - test-and-fix loops that need multiple commands
 
 Progress updates are explicitly marked as non-final, so the operator can distinguish them from the final report.
@@ -73,11 +73,11 @@ This makes it a useful control plane during outages.
 
 ## Shared operational memory
 
-The bot keeps lightweight chat history and project-aware context. It also points Codex at runbooks, project notes, incident archives, and a global changelog stored on the VPS.
+The bot keeps lightweight chat history and project-aware context. It also points Codex at project runbooks, project notes, project changelogs, and incident archives stored on the VPS.
 
 This gives remote work a memory layer without requiring every detail to live in Telegram history or in a local-only notebook.
 
-The global changelog is useful for chronological state: what changed, what was deployed, and what is planned but not done yet. Project `NOTES.md` files are useful for durable project facts, pitfalls, decisions, and pending work. Together, they let Codex continue from server-side operational memory instead of relying only on recent chat context.
+Project `CHANGELOG.md` files are useful for chronological state: what changed, what was deployed, and what is planned but not done yet. Project `NOTES.md` files are useful for durable project facts, pitfalls, decisions, and pending work. Together, they let Codex continue from server-side operational memory instead of relying only on recent chat context.
 
 ## Headless native Codex auth
 

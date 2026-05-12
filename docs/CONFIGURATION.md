@@ -13,7 +13,6 @@ All runtime configuration is loaded from `/etc/codex-ops/bot.env`.
 - `STATE_DIR` (default: `/var/lib/codexops/state`): bot offset/chat state/debug logs.
 - `OPENCLAW_CONTAINER` (default: `openclaw-yvrh-openclaw-1`): container used by OpenClaw diagnostics.
 - `CODEX_CWD` (default: `/srv/codex-ops/incidents`): working directory for `codex exec`.
-- `GLOBAL_CHANGELOG_FILE` (default: `/srv/codex-ops/CHANGELOG.md`): global chronological memory file included in Codex prompts.
 - `HOST_LABEL` (default: hostname): display label in bot responses.
 - `ASSISTANT_LANGUAGE` (default: `Russian`): language instruction passed into Codex prompts.
 
@@ -79,7 +78,6 @@ INCIDENTS_DIR=/srv/codex-ops/incidents
 STATE_DIR=/var/lib/codexops/state
 OPENCLAW_CONTAINER=openclaw-yvrh-openclaw-1
 CODEX_CWD=/srv/codex-ops/incidents
-GLOBAL_CHANGELOG_FILE=/srv/codex-ops/CHANGELOG.md
 HOST_LABEL=prod-vps-1
 ASSISTANT_LANGUAGE=Russian
 HISTORY_ITEMS=8

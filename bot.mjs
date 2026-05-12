@@ -18,7 +18,6 @@ const CODEX_HOME = process.env.CODEX_HOME || '/var/lib/codexops/.codex';
 const CODEX_CWD = process.env.CODEX_CWD || INCIDENTS_DIR;
 const OPS_CONTEXT_FILE = process.env.OPS_CONTEXT_FILE || '/srv/codex-ops/OPS_CONTEXT.md';
 const RUNBOOK_FILE = process.env.RUNBOOK_FILE || '/srv/codex-ops/RUNBOOK_OPENCLAW.md';
-const GLOBAL_CHANGELOG_FILE = process.env.GLOBAL_CHANGELOG_FILE || '/srv/codex-ops/CHANGELOG.md';
 const HOST_LABEL = process.env.HOST_LABEL || os.hostname();
 const ASSISTANT_LANGUAGE = (process.env.ASSISTANT_LANGUAGE || 'Russian').trim() || 'Russian';
 const HISTORY_ITEMS = Math.max(0, Number(process.env.HISTORY_ITEMS || '8') || 8);
@@ -541,7 +540,13 @@ function appendExchange(state, question, answer) {
 function projectPaths(project) {
   const safe = normalizeProjectName(project) || DEFAULT_PROJECT;
   const dir = path.join(PROJECTS_DIR, safe);
-  return { dir, context: path.join(dir, 'CONTEXT.md'), runbook: path.join(dir, 'RUNBOOK.md'), notes: path.join(dir, 'NOTES.md') };
+  return {
+    dir,
+    context: path.join(dir, 'CONTEXT.md'),
+    runbook: path.join(dir, 'RUNBOOK.md'),
+    changelog: path.join(dir, 'CHANGELOG.md'),
+    notes: path.join(dir, 'NOTES.md'),
+  };
 }
 
 async function listProjects() {
@@ -684,26 +689,21 @@ async function ensureFile(file, text) {
   if (!(await fileExists(file))) await fs.writeFile(file, `${text.trim()}\n`, 'utf8');
 }
 
-function defaultGlobalChangelog() {
-  return `# Codex Ops Changelog
+function defaultProjectChangelog(project) {
+  return `# ${project} Changelog
 
-Use this file as the chronological memory for important server, agent, project, and operations changes.
+Use this file as the chronological memory for completed changes and planned-but-not-done work in this project.
 
 ## Unreleased
 
 ### Done
 
-- Initial codex-ops memory file created.
+- Initial project changelog created.
 
 ### Planned
 
 - Add future planned work here when a task is agreed but not completed yet.
 `;
-}
-
-async function ensureGlobalMemoryFiles() {
-  await fs.mkdir(path.dirname(GLOBAL_CHANGELOG_FILE), { recursive: true });
-  await ensureFile(GLOBAL_CHANGELOG_FILE, defaultGlobalChangelog());
 }
 
 async function ensureProjectFiles(project) {
@@ -713,6 +713,7 @@ async function ensureProjectFiles(project) {
   await fs.mkdir(paths.dir, { recursive: true });
   await ensureFile(paths.context, defaultProjectContext(safe));
   await ensureFile(paths.runbook, defaultProjectRunbook(safe));
+  await ensureFile(paths.changelog, defaultProjectChangelog(safe));
   await ensureFile(paths.notes, defaultProjectNotes(safe));
   return paths;
 }
@@ -881,9 +882,9 @@ async function buildQuestionPrompt(question, options = {}) {
   const paths = projectPaths(activeProject);
   const opsContext = await readMaybe(OPS_CONTEXT_FILE, 25000);
   const globalRunbook = await readMaybe(RUNBOOK_FILE, 12000);
-  const globalChangelog = await readMaybe(GLOBAL_CHANGELOG_FILE, 12000);
   const projectContext = await readMaybe(paths.context, 22000);
   const projectRunbook = await readMaybe(paths.runbook, 12000);
+  const projectChangelog = await readMaybe(paths.changelog, 16000);
   const projectNotes = await readMaybe(paths.notes, 14000);
   const historyText = options.disableHistory ? '(disabled for this request)' : formatHistory(chatState.history);
   const historical = activeProject === 'openclaw' ? await latestIncident('openclaw') : await latestIncident(activeProject);
@@ -894,10 +895,10 @@ async function buildQuestionPrompt(question, options = {}) {
     'Secondary mission: broader server setup and diagnostics.',
     `Active project for this chat: ${activeProject}.`,
     'Respect the active project first. Only widen scope when the user clearly asks for another system or the evidence requires it.',
-    `Global changelog file: ${GLOBAL_CHANGELOG_FILE}.`,
-    `Use ${GLOBAL_CHANGELOG_FILE} as chronological operational memory: record important completed changes and planned-but-not-done work when a task changes server state, code, configuration, docs, agent behavior, or future plans.`,
+    `Active project changelog file: ${paths.changelog}.`,
+    'Use the active project CHANGELOG.md as chronological project memory for completed changes and planned-but-not-done work.',
     'Use the active project NOTES.md as durable project memory for facts, pitfalls, pending work, and decisions that should survive beyond recent chat history.',
-    `If the user asks to create or update changelog, write only to ${GLOBAL_CHANGELOG_FILE} unless the user explicitly requests a project-local changelog.`,
+    'If the user asks to create or update changelog, write to the active project CHANGELOG.md unless the user explicitly gives another path.',
     `Do not create changelog files inside ${INCIDENTS_DIR}.`,
     `Respond in ${ASSISTANT_LANGUAGE}.`,
     'Do the necessary investigation yourself before answering when the question requires checking the server.',
@@ -914,10 +915,6 @@ async function buildQuestionPrompt(question, options = {}) {
     globalRunbook,
     '</global_runbook>',
     '',
-    '<global_changelog>',
-    globalChangelog,
-    '</global_changelog>',
-    '',
     '<project_context>',
     projectContext,
     '</project_context>',
@@ -925,6 +922,10 @@ async function buildQuestionPrompt(question, options = {}) {
     '<project_runbook>',
     projectRunbook,
     '</project_runbook>',
+    '',
+    '<project_changelog>',
+    projectChangelog,
+    '</project_changelog>',
     '',
     '<project_notes>',
     projectNotes,
@@ -954,6 +955,7 @@ async function renderContext(chatId) {
     `History items kept: ${chatState.history.length}/${HISTORY_ITEMS}`,
     `Project context: ${await fileExists(paths.context) ? paths.context : '(missing)'}`,
     `Project runbook: ${await fileExists(paths.runbook) ? paths.runbook : '(missing)'}`,
+    `Project changelog: ${await fileExists(paths.changelog) ? paths.changelog : '(missing)'}`,
     `Project notes: ${await fileExists(paths.notes) ? paths.notes : '(missing)'}`,
     `Known projects: ${projects.join(', ') || '(none)'}`,
   ].join('\n');
@@ -1254,7 +1256,6 @@ async function main() {
   if (!BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN is not set');
   await fs.mkdir(STATE_DIR, { recursive: true });
   await fs.mkdir(PROJECTS_DIR, { recursive: true });
-  await ensureGlobalMemoryFiles();
   await ensureProjectFiles('openclaw');
   await ensureProjectFiles('server');
   await initializeOffset();
