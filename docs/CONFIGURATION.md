@@ -36,6 +36,8 @@ All runtime configuration is loaded from `/etc/codex-ops/bot.env`.
 
 - `CODEX_DEVICE_AUTH_TIMEOUT_MS` (default: `900000`): timeout for `/codex login` device auth flow.
 - `CODEX_EXEC_TIMEOUT_MS` (default: `0`): timeout for `codex exec` runs in milliseconds. Set `0` to disable timeout and wait for real completion.
+- `CODEX_PROGRESS_INTERVAL_MS` (default: `300000`): interval for "Codex progress update" Telegram messages while `codex exec` is still running. Set `0` to disable. Positive values below `60000` are raised to `60000`.
+- `CODEX_PROGRESS_MAX_CHARS` (default: `1800`): max length of streamed assistant progress copied into each progress update.
 
 ## Suggested presets
 
@@ -88,4 +90,7 @@ TG_RETRY_FALLBACK_DELAY_MS=2000
 TG_RETRY_MAX_WAIT_MS=120000
 HISTORICAL_INCIDENT_LIMIT=4000
 CODEX_DEVICE_AUTH_TIMEOUT_MS=900000
+CODEX_EXEC_TIMEOUT_MS=0
+CODEX_PROGRESS_INTERVAL_MS=300000
+CODEX_PROGRESS_MAX_CHARS=1800
 ```

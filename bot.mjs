@@ -35,9 +35,21 @@ const TG_RETRY_MAX_WAIT_MS = Math.max(1000, Number(process.env.TG_RETRY_MAX_WAIT
 const HISTORICAL_INCIDENT_LIMIT = Math.max(1000, Number(process.env.HISTORICAL_INCIDENT_LIMIT || '4000') || 4000);
 const CODEX_DEVICE_AUTH_TIMEOUT_MS = Math.max(120000, Number(process.env.CODEX_DEVICE_AUTH_TIMEOUT_MS || '900000') || 900000);
 const CODEX_EXEC_TIMEOUT_MS = Math.max(0, Number(process.env.CODEX_EXEC_TIMEOUT_MS || '0') || 0);
+const CODEX_PROGRESS_INTERVAL_MS = readOptionalNonNegativeMs('CODEX_PROGRESS_INTERVAL_MS', 300000, { minPositive: 60000 });
+const CODEX_PROGRESS_MAX_CHARS = Math.max(500, Number(process.env.CODEX_PROGRESS_MAX_CHARS || '1800') || 1800);
 let offset = 0;
 let busy = false;
 let authFlow = null;
+
+function readOptionalNonNegativeMs(name, defaultValue, opts = {}) {
+  const raw = process.env[name];
+  if (raw == null || String(raw).trim() === '') return defaultValue;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) return defaultValue;
+  if (value === 0) return 0;
+  const minPositive = Number(opts.minPositive) || 0;
+  return Math.max(minPositive, value);
+}
 
 function nowStamp() {
   return new Date().toISOString().replace(/[:.]/g, '-');
@@ -219,6 +231,67 @@ function extractCodexAssistantFallback(stderrText, limit = 2800) {
   return clip(last, limit);
 }
 
+function createCodexProgressReporter({ chatId, intervalMs = CODEX_PROGRESS_INTERVAL_MS, maxChars = CODEX_PROGRESS_MAX_CHARS } = {}) {
+  if (!chatId || !Number.isFinite(intervalMs) || intervalMs <= 0) {
+    return { pushStderr() {}, stop() {} };
+  }
+
+  const startedAt = Date.now();
+  let stderrText = '';
+  let lastSentText = '';
+  let sending = false;
+  let stopped = false;
+
+  const buildProgressMessage = () => {
+    const elapsed = formatDurationMs(Date.now() - startedAt);
+    const assistantText = extractCodexAssistantFallback(stderrText, maxChars);
+    if (assistantText && assistantText !== lastSentText) {
+      lastSentText = assistantText;
+      return [
+        'Codex progress update',
+        `Elapsed: ${elapsed}. This is not the final answer.`,
+        '',
+        assistantText,
+      ].join('\n');
+    }
+
+    return [
+      'Codex progress update',
+      `Elapsed: ${elapsed}. This is not the final answer.`,
+      '',
+      'Codex is still working. It did not emit a new text progress summary during the last interval; the final report will arrive as a separate message.',
+    ].join('\n');
+  };
+
+  const sendProgress = async () => {
+    if (stopped || sending) return;
+    sending = true;
+    try {
+      await sendMessage(chatId, buildProgressMessage());
+    } catch (error) {
+      console.warn(`[bot-progress-send-failed] chat=${chatId} error=${error && (error.stack || error.message)}`);
+    } finally {
+      sending = false;
+    }
+  };
+
+  const timer = setInterval(() => {
+    void sendProgress();
+  }, intervalMs);
+  if (typeof timer.unref === 'function') timer.unref();
+
+  return {
+    pushStderr(chunk) {
+      stderrText += String(chunk || '');
+      if (stderrText.length > 120000) stderrText = stderrText.slice(-120000);
+    },
+    stop() {
+      stopped = true;
+      clearInterval(timer);
+    },
+  };
+}
+
 async function codexLoginStatus() {
   const args = ['HOME=/var/lib/codexops', `CODEX_HOME=${CODEX_HOME}`, 'codex', 'login', 'status'];
   return run('env', args, { timeoutMs: 30000 });
@@ -346,7 +419,14 @@ function resolveRunTimeoutMs(opts, defaultMs = 120000) {
 
 function run(command, args, opts = {}) {
   return new Promise((resolve) => {
-    const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], ...opts });
+    const {
+      input,
+      onStdout,
+      onStderr,
+      timeoutMs: _timeoutMs,
+      ...spawnOpts
+    } = opts;
+    const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], ...spawnOpts });
     let stdout = '';
     let stderr = '';
     const timeoutMs = resolveRunTimeoutMs(opts);
@@ -358,9 +438,17 @@ function run(command, args, opts = {}) {
         child.kill('SIGTERM');
       }, timeoutMs);
     }
-    if (opts.input) child.stdin.end(opts.input); else child.stdin.end();
-    child.stdout.on('data', (d) => { stdout += d.toString(); });
-    child.stderr.on('data', (d) => { stderr += d.toString(); });
+    if (input) child.stdin.end(input); else child.stdin.end();
+    child.stdout.on('data', (d) => {
+      const text = d.toString();
+      stdout += text;
+      if (typeof onStdout === 'function') onStdout(text);
+    });
+    child.stderr.on('data', (d) => {
+      const text = d.toString();
+      stderr += text;
+      if (typeof onStderr === 'function') onStderr(text);
+    });
     child.on('close', (code, signal) => {
       if (timer) clearTimeout(timer);
       resolve({ code, signal, stdout, stderr, timedOut });
@@ -624,11 +712,17 @@ async function collectOpenClawDiag() {
   return sh(script, 300000);
 }
 
-async function runCodex(prompt) {
+async function runCodex(prompt, options = {}) {
   const outFile = path.join(STATE_DIR, `codex-${nowStamp()}.txt`);
   await fs.mkdir(STATE_DIR, { recursive: true });
   const args = ['HOME=/var/lib/codexops', `CODEX_HOME=${CODEX_HOME}`, 'codex', 'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--color', 'never', '-C', CODEX_CWD, '-o', outFile, '-'];
-  const result = await run('env', args, { input: prompt, timeoutMs: CODEX_EXEC_TIMEOUT_MS > 0 ? CODEX_EXEC_TIMEOUT_MS : null });
+  const progress = createCodexProgressReporter({ chatId: options.chatId });
+  const result = await run('env', args, {
+    input: prompt,
+    timeoutMs: CODEX_EXEC_TIMEOUT_MS > 0 ? CODEX_EXEC_TIMEOUT_MS : null,
+    onStderr: (chunk) => progress.pushStderr(chunk),
+  });
+  progress.stop();
   let finalText = '';
   try {
     finalText = (await fs.readFile(outFile, 'utf8')).trim();
@@ -757,6 +851,7 @@ async function buildQuestionPrompt(question, options = {}) {
     `Respond in ${ASSISTANT_LANGUAGE}.`,
     'Do the necessary investigation yourself before answering when the question requires checking the server.',
     'Use concise final-answer style only. Do not provide chain-of-thought, hidden reasoning, or long reflective narration.',
+    'For long-running tasks, emit short visible progress updates when meaningful milestones happen. These updates are not final answers.',
     'Prefer direct practical answers and mention real uncertainty briefly when needed.',
     'Some project workspaces may live inside the OpenClaw container rather than on the host.',
     '',
@@ -1009,7 +1104,7 @@ async function handle(chatId, text) {
         context,
         '</runtime_context>',
       ].join('\n');
-      const answer = await runCodex(prompt);
+      const answer = await runCodex(prompt, { chatId });
       const file = path.join(INCIDENTS_DIR, `diag_openclaw_${nowStamp()}.md`);
       const doc = ['# OpenClaw diagnostic run', '', `Time: ${new Date().toISOString()}`, '', '## Codex analysis', '', answer, '', '## Raw context', '', '```text', context.slice(0, 120000), '```', ''].join('\n');
       await fs.writeFile(file, doc, 'utf8');
@@ -1034,7 +1129,7 @@ async function handle(chatId, text) {
     try {
       const state = await getChatState(chatId);
       await sendMessage(chatId, `Working on it...\nProject: ${state.project}`);
-      const answer = await runCodex(await buildQuestionPrompt(question, { chatId }));
+      const answer = await runCodex(await buildQuestionPrompt(question, { chatId }), { chatId });
       await updateChatState(chatId, async (current) => appendExchange(current, question, answer));
       await sendMessage(chatId, answer);
     } finally {
@@ -1054,7 +1149,7 @@ async function handle(chatId, text) {
   try {
     const state = await getChatState(chatId);
     await sendMessage(chatId, `Working on it...\nProject: ${state.project}`);
-    const answer = await runCodex(await buildQuestionPrompt(trimmed, { chatId }));
+    const answer = await runCodex(await buildQuestionPrompt(trimmed, { chatId }), { chatId });
     await updateChatState(chatId, async (current) => appendExchange(current, trimmed, answer));
     await sendMessage(chatId, answer);
   } finally {
