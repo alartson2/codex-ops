@@ -1,20 +1,34 @@
 # codex-ops
 
-Host-level Telegram operations bot for Codex CLI, designed for OpenClaw and general VPS operations.
+Host-level Telegram operations bot for Codex CLI, designed for OpenClaw, remote agent systems, and general VPS operations.
 
 ## What this project does
 
-`codex-ops` runs outside your OpenClaw container and gives you a stable operational channel in Telegram:
+`codex-ops` runs on the target host and gives you a stable operational channel in Telegram:
 
 - ask Codex to investigate issues directly from the server
+- build, inspect, and test remote agent systems where they actually run
 - run targeted diagnostics (`/status`, `/diag openclaw`)
 - keep short per-chat context with project switching
 - perform native Codex device login through Telegram (`/codex login`)
 - protect Telegram from flood output with message chunk limits and safe fallback behavior
+- receive periodic progress updates during long-running Codex tasks
 
 ## Why this exists
 
-When OpenClaw or its container runtime is unhealthy, diagnostics from inside the container are often hard to trust or hard to reach. `codex-ops` keeps the control layer on the host, so incident response still works during runtime failures.
+Modern agent systems are often easiest to build on the machine where they will actually run. They depend on real host paths, containers, credentials, services, logs, ports, cron jobs, systemd units, and production-like data. Recreating that environment locally can be slow, incomplete, or risky.
+
+`codex-ops` turns a VPS into a remote Codex workbench controlled from Telegram. You can ask for changes, diagnostics, tests, and operational follow-up from anywhere, while Codex works directly inside the server context. This is especially useful for building multi-agent systems around OpenClaw: the agents, wrappers, logs, runtime state, and test surface all stay in one place instead of being split between a local laptop, SSH sessions, and a deployment target.
+
+It also keeps the control layer outside the OpenClaw container. When OpenClaw or its runtime is unhealthy, diagnostics from inside the container may be hard to trust or hard to reach. `codex-ops` stays on the host, so incident response and repair work can continue even when the application layer is broken.
+
+The goal is not to replace SSH completely. The goal is to make the common loop faster:
+
+1. describe the task in Telegram
+2. let Codex inspect the real server
+3. receive progress updates while long tasks run
+4. review the final result in Telegram
+5. keep the useful context and changelog on the VPS
 
 ## Main features
 
@@ -23,7 +37,20 @@ When OpenClaw or its container runtime is unhealthy, diagnostics from inside the
 - Native subscription device auth flow (`/codex login`)
 - Persistent lightweight chat state and project-aware context
 - OpenClaw-focused diagnostics and incident note generation
+- Periodic progress updates for long-running Codex tasks
+- Telegram HTML rendering for Codex Markdown output
 - 429-aware Telegram send retry logic and anti-flood truncation
+
+## Common use cases
+
+- Remote multi-agent system development: create and refine OpenClaw agents, wrappers, orchestration scripts, prompts, tools, and runtime glue directly on the VPS where they will execute.
+- Mobile operations cockpit: run server checks, ask Codex to inspect logs, and receive final reports from Telegram without keeping an SSH session open.
+- Production-adjacent test loops: change code, run commands, inspect service state, and verify behavior against real containers, ports, files, and systemd units.
+- Out-of-band incident response: keep a host-level assistant available even when the OpenClaw application layer or container runtime is degraded.
+- Long-running remote work: start larger Codex tasks from Telegram and receive periodic "Codex progress update" messages until the final answer arrives.
+- Shared operational memory: keep lightweight project context, runbooks, incident notes, and a global changelog on the server instead of scattering them across local machines.
+- Native Codex subscription auth on headless hosts: start device login from Telegram and complete browser confirmation elsewhere.
+- Safer Telegram output: convert Codex Markdown to Telegram-native formatting while limiting message chunks and avoiding raw stdout/stderr floods.
 
 ## Quick install (Ubuntu VPS)
 
@@ -84,6 +111,7 @@ sudo systemctl status --no-pager codex-telegram-bot.service
 
 ## Documentation
 
+- [Use cases](docs/USE_CASES.md)
 - [Detailed installation guide](docs/INSTALL.md)
 - [Configuration reference](docs/CONFIGURATION.md)
 - [Operations runbook](docs/OPERATIONS.md)
