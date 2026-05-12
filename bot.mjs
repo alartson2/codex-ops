@@ -627,6 +627,8 @@ function defaultProjectNotes(project) {
   if (project === 'openclaw') {
     return `# OpenClaw Notes
 
+## Important facts
+
 Known upgrade and maintenance considerations:
 - persist fixes into the image/build path, not only the live container filesystem
 - re-check /hostinger/server.mjs after every OpenClaw image rebuild or version upgrade
@@ -635,26 +637,73 @@ Known upgrade and maintenance considerations:
 - watch for Chromium/browser profile lock symptoms and handshake timeouts during restarts
 - after upgrades, verify ports 18789 and 18791, recent docker logs, gateway file logs, and process tree stability
 
-Pending context merge:
+## Pending
+
 - user mentioned older upgrade pain points collected elsewhere for /projects-based work
 - current live check on 2026-04-19 did not find /projects inside the active container, so those notes were not auto-imported yet
 - when the source path is identified later, filter the useful parts into this file
+
+## Done
+
+- Add durable OpenClaw outcomes and decisions here.
 `;
   }
   if (project === 'server') {
     return `# Server Notes
 
+## Important facts
+
 Use this file for cross-service operational notes that are broader than OpenClaw.
+
+## Pending
+
+- Add planned but unfinished server work here.
+
+## Done
+
+- Add durable server outcomes and decisions here.
 `;
   }
   return `# ${project} Notes
 
-Add filtered lessons, risks, and upgrade notes for this project here.
+## Important facts
+
+- Add filtered lessons, risks, deployment details, and upgrade notes for this project here.
+
+## Pending
+
+- Add planned but unfinished work here.
+
+## Done
+
+- Add durable outcomes and decisions here.
 `;
 }
 
 async function ensureFile(file, text) {
   if (!(await fileExists(file))) await fs.writeFile(file, `${text.trim()}\n`, 'utf8');
+}
+
+function defaultGlobalChangelog() {
+  return `# Codex Ops Changelog
+
+Use this file as the chronological memory for important server, agent, project, and operations changes.
+
+## Unreleased
+
+### Done
+
+- Initial codex-ops memory file created.
+
+### Planned
+
+- Add future planned work here when a task is agreed but not completed yet.
+`;
+}
+
+async function ensureGlobalMemoryFiles() {
+  await fs.mkdir(path.dirname(GLOBAL_CHANGELOG_FILE), { recursive: true });
+  await ensureFile(GLOBAL_CHANGELOG_FILE, defaultGlobalChangelog());
 }
 
 async function ensureProjectFiles(project) {
@@ -846,6 +895,8 @@ async function buildQuestionPrompt(question, options = {}) {
     `Active project for this chat: ${activeProject}.`,
     'Respect the active project first. Only widen scope when the user clearly asks for another system or the evidence requires it.',
     `Global changelog file: ${GLOBAL_CHANGELOG_FILE}.`,
+    `Use ${GLOBAL_CHANGELOG_FILE} as chronological operational memory: record important completed changes and planned-but-not-done work when a task changes server state, code, configuration, docs, agent behavior, or future plans.`,
+    'Use the active project NOTES.md as durable project memory for facts, pitfalls, pending work, and decisions that should survive beyond recent chat history.',
     `If the user asks to create or update changelog, write only to ${GLOBAL_CHANGELOG_FILE} unless the user explicitly requests a project-local changelog.`,
     `Do not create changelog files inside ${INCIDENTS_DIR}.`,
     `Respond in ${ASSISTANT_LANGUAGE}.`,
@@ -1203,6 +1254,7 @@ async function main() {
   if (!BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN is not set');
   await fs.mkdir(STATE_DIR, { recursive: true });
   await fs.mkdir(PROJECTS_DIR, { recursive: true });
+  await ensureGlobalMemoryFiles();
   await ensureProjectFiles('openclaw');
   await ensureProjectFiles('server');
   await initializeOffset();

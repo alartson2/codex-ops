@@ -131,15 +131,57 @@ Fast check list:
 EOF
   fi
 
+  if [[ ! -f /srv/codex-ops/CHANGELOG.md ]]; then
+    cat >/srv/codex-ops/CHANGELOG.md <<'EOF'
+# Codex Ops Changelog
+
+Use this file as the chronological memory for important server, agent, project, and operations changes.
+
+## Unreleased
+
+### Done
+
+- Initial codex-ops memory file created.
+
+### Planned
+
+- Add future planned work here when a task is agreed but not completed yet.
+EOF
+  fi
+
   if [[ ! -f /srv/codex-ops/projects/server/NOTES.md ]]; then
     cat >/srv/codex-ops/projects/server/NOTES.md <<'EOF'
 # Server Notes
+
+## Important facts
+
+- Add stable host-level facts here.
+
+## Pending
+
+- Add planned but unfinished work here.
+
+## Done
+
+- Add durable outcomes and decisions here.
 EOF
   fi
 
   if [[ ! -f /srv/codex-ops/projects/openclaw/NOTES.md ]]; then
     cat >/srv/codex-ops/projects/openclaw/NOTES.md <<'EOF'
 # OpenClaw Notes
+
+## Important facts
+
+- Add stable OpenClaw runtime facts here.
+
+## Pending
+
+- Add planned but unfinished work here.
+
+## Done
+
+- Add durable outcomes and decisions here.
 EOF
   fi
 }
@@ -161,6 +203,7 @@ INCIDENTS_DIR=/srv/codex-ops/incidents
 STATE_DIR=/var/lib/codexops/state
 OPENCLAW_CONTAINER=${OPENCLAW_CONTAINER}
 CODEX_CWD=/srv/codex-ops/incidents
+GLOBAL_CHANGELOG_FILE=/srv/codex-ops/CHANGELOG.md
 HOST_LABEL=$(hostname)
 EOF
   chmod 0600 "${env_file}"

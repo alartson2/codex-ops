@@ -36,6 +36,7 @@ The goal is not to replace SSH completely. The goal is to make the common loop f
 - Codex CLI integration (`codex exec`) for investigations and Q/A
 - Native subscription device auth flow (`/codex login`)
 - Persistent lightweight chat state and project-aware context
+- Out-of-the-box server-side memory files (`CHANGELOG.md`, project `NOTES.md`, context, and runbooks)
 - OpenClaw-focused diagnostics and incident note generation
 - Periodic progress updates for long-running Codex tasks
 - Telegram HTML rendering for Codex Markdown output
@@ -112,6 +113,7 @@ sudo systemctl status --no-pager codex-telegram-bot.service
 ## Documentation
 
 - [Use cases](docs/USE_CASES.md)
+- [Operational memory](docs/MEMORY.md)
 - [Detailed installation guide](docs/INSTALL.md)
 - [Configuration reference](docs/CONFIGURATION.md)
 - [Operations runbook](docs/OPERATIONS.md)
