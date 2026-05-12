@@ -24,6 +24,7 @@ All runtime configuration is loaded from `/etc/codex-ops/bot.env`.
 
 ## Telegram output and anti-flood tuning
 
+- `TELEGRAM_FORMAT` (default: `html`): output formatting mode. Use `html` to render Codex Markdown as Telegram-native bold, italic, links, inline code, and code blocks. Use `plain` to disable formatting.
 - `MAX_MESSAGE` (default: `3500`): per-message chunk size (hard capped in code).
 - `MAX_MESSAGE_CHUNKS` (default: `4`): max outbound chunks per response.
 - `OUTBOUND_DELAY_MS` (default: `250`): delay between chunks.
@@ -41,6 +42,7 @@ All runtime configuration is loaded from `/etc/codex-ops/bot.env`.
 Balanced (recommended default):
 
 ```env
+TELEGRAM_FORMAT=html
 HISTORY_ITEMS=8
 HISTORY_ITEM_CHARS=1400
 MAX_MESSAGE=3500

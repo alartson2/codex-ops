@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { formatTelegramMessageChunks } from './lib/telegram-format.mjs';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const ALLOWED_CHAT_IDS = new Set((process.env.ALLOWED_CHAT_IDS || '').split(',').map((s) => s.trim()).filter(Boolean));
@@ -24,6 +25,9 @@ const HISTORY_ITEMS = Math.max(0, Number(process.env.HISTORY_ITEMS || '8') || 8)
 const HISTORY_ITEM_CHARS = Math.max(300, Number(process.env.HISTORY_ITEM_CHARS || '1400') || 1400);
 const MAX_MESSAGE = Math.min(3500, Math.max(500, Number(process.env.MAX_MESSAGE || '3500') || 3500));
 const MAX_MESSAGE_CHUNKS = Math.min(20, Math.max(1, Number(process.env.MAX_MESSAGE_CHUNKS || '4') || 4));
+const TELEGRAM_FORMAT = ['html', 'plain'].includes(String(process.env.TELEGRAM_FORMAT || 'html').trim().toLowerCase())
+  ? String(process.env.TELEGRAM_FORMAT || 'html').trim().toLowerCase()
+  : 'html';
 const OUTBOUND_DELAY_MS = Math.max(0, Number(process.env.OUTBOUND_DELAY_MS || '250') || 250);
 const TG_RETRY_ATTEMPTS = Math.max(1, Number(process.env.TG_RETRY_ATTEMPTS || '3') || 3);
 const TG_RETRY_FALLBACK_DELAY_MS = Math.max(500, Number(process.env.TG_RETRY_FALLBACK_DELAY_MS || '2000') || 2000);
@@ -61,25 +65,6 @@ function formatDurationMs(ms) {
   return `${s}s`;
 }
 
-function normalizeMarkdownForTelegram(text) {
-  let value = String(text || '').replace(/\r\n/g, '\n');
-  // Fenced code blocks: keep code, drop fences/lang marker.
-  value = value.replace(/```[a-zA-Z0-9_.+-]*\n([\s\S]*?)```/g, (_, code) => `\n${String(code || '').replace(/\n$/, '')}\n`);
-  // Inline code.
-  value = value.replace(/`([^`\n]+)`/g, '$1');
-  // Markdown links -> "label (url)".
-  value = value.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '$1 ($2)');
-  // Common style markers.
-  value = value.replace(/(\*\*|__)(.*?)\1/g, '$2');
-  value = value.replace(/~~(.*?)~~/g, '$1');
-  value = value.replace(/(^|[^\*])\*([^\*\n]+)\*(?=[^\*]|$)/g, '$1$2');
-  value = value.replace(/(^|[^\w])_([^_\n]+)_(?=[^\w]|$)/g, '$1$2');
-  // Headings and blockquotes.
-  value = value.replace(/^#{1,6}\s+/gm, '');
-  value = value.replace(/^>\s?/gm, '');
-  return value;
-}
-
 function compactIncidentForPrompt(text, limit = HISTORICAL_INCIDENT_LIMIT) {
   const value = String(text || '');
   const rawMarker = '\n## Raw context';
@@ -111,6 +96,7 @@ class TelegramApiError extends Error {
     this.method = method;
     this.status = status;
     this.errorCode = Number(data && data.error_code) || 0;
+    this.description = String(data && data.description || '');
     const retry = data && data.parameters && data.parameters.retry_after;
     this.retryAfterSec = Number.isFinite(Number(retry)) ? Number(retry) : null;
   }
@@ -151,21 +137,33 @@ async function tgSendMessageWithRetry(payload, meta = {}) {
 }
 
 async function sendMessage(chatId, text, extra = {}) {
-  const value = normalizeMarkdownForTelegram(String(text || '').trim() || '(empty response)');
-  const chunks = [];
-  for (let i = 0; i < value.length; i += MAX_MESSAGE) chunks.push(value.slice(i, i + MAX_MESSAGE));
-  if (chunks.length === 0) chunks.push(value);
+  const value = String(text || '').trim() || '(empty response)';
+  const chunks = formatTelegramMessageChunks(value, { maxLength: MAX_MESSAGE, format: TELEGRAM_FORMAT });
   let outbound = chunks;
   if (chunks.length > MAX_MESSAGE_CHUNKS) {
     const kept = chunks.slice(0, MAX_MESSAGE_CHUNKS - 1);
     const omitted = chunks.length - kept.length;
-    kept.push(`Reply truncated to avoid Telegram flood.\nSent chunks: ${kept.length}/${chunks.length}.\nFull body was not delivered to chat.`);
+    kept.push(...formatTelegramMessageChunks(
+      `Reply truncated to avoid Telegram flood.\nSent chunks: ${kept.length}/${chunks.length}.\nFull body was not delivered to chat.`,
+      { maxLength: MAX_MESSAGE, format: TELEGRAM_FORMAT },
+    ).slice(0, 1));
     outbound = kept;
     console.warn(`[bot-send-truncated] chat=${chatId} chunks=${chunks.length} omitted=${omitted}`);
   }
   for (let i = 0; i < outbound.length; i += 1) {
     const chunk = outbound[i];
-    await tgSendMessageWithRetry({ chat_id: chatId, text: chunk, disable_web_page_preview: true, ...extra }, { chatId });
+    const payload = { chat_id: chatId, text: chunk.text, disable_web_page_preview: true, ...extra };
+    if (chunk.parseMode && !Object.prototype.hasOwnProperty.call(extra, 'parse_mode')) payload.parse_mode = chunk.parseMode;
+    try {
+      await tgSendMessageWithRetry(payload, { chatId });
+    } catch (error) {
+      const canFallbackToPlain = payload.parse_mode === 'HTML' && error instanceof TelegramApiError && error.errorCode === 400;
+      if (!canFallbackToPlain) throw error;
+      console.warn(`[bot-send-format-fallback] chat=${chatId} error=${error.description || error.message}`);
+      const fallbackPayload = { ...payload, text: chunk.plainText || '(empty response)' };
+      delete fallbackPayload.parse_mode;
+      await tgSendMessageWithRetry(fallbackPayload, { chatId });
+    }
     if (OUTBOUND_DELAY_MS > 0 && i + 1 < outbound.length) await sleep(OUTBOUND_DELAY_MS);
   }
 }
