@@ -73,7 +73,7 @@ function normalizeMarkdownForTelegram(text) {
   value = value.replace(/(\*\*|__)(.*?)\1/g, '$2');
   value = value.replace(/~~(.*?)~~/g, '$1');
   value = value.replace(/(^|[^\*])\*([^\*\n]+)\*(?=[^\*]|$)/g, '$1$2');
-  value = value.replace(/(^|[^_])_([^_\n]+)_(?=[^_]|$)/g, '$1$2');
+  value = value.replace(/(^|[^\w])_([^_\n]+)_(?=[^\w]|$)/g, '$1$2');
   // Headings and blockquotes.
   value = value.replace(/^#{1,6}\s+/gm, '');
   value = value.replace(/^>\s?/gm, '');
@@ -339,12 +339,19 @@ async function cancelDeviceAuthFlow(chatId) {
   await sendMessage(chatId, 'Canceled active login flow.');
 }
 
+function resolveRunTimeoutMs(opts, defaultMs = 120000) {
+  if (!Object.prototype.hasOwnProperty.call(opts, 'timeoutMs')) return defaultMs;
+  if (opts.timeoutMs == null) return 0;
+  const value = Number(opts.timeoutMs);
+  return Number.isFinite(value) ? Math.max(0, value) : defaultMs;
+}
+
 function run(command, args, opts = {}) {
   return new Promise((resolve) => {
     const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], ...opts });
     let stdout = '';
     let stderr = '';
-    const timeoutMs = opts.timeoutMs == null ? 120000 : Number(opts.timeoutMs);
+    const timeoutMs = resolveRunTimeoutMs(opts);
     let timedOut = false;
     let timer = null;
     if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
