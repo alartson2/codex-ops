@@ -34,6 +34,7 @@ All runtime configuration is loaded from `/etc/codex-ops/bot.env`.
 ## Auth flow tuning
 
 - `CODEX_DEVICE_AUTH_TIMEOUT_MS` (default: `900000`): timeout for `/codex login` device auth flow.
+- `CODEX_EXEC_TIMEOUT_MS` (default: `0`): timeout for `codex exec` runs in milliseconds. Set `0` to disable timeout and wait for real completion.
 
 ## Suggested presets
 

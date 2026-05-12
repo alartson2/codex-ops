@@ -17,6 +17,7 @@ const CODEX_HOME = process.env.CODEX_HOME || '/var/lib/codexops/.codex';
 const CODEX_CWD = process.env.CODEX_CWD || INCIDENTS_DIR;
 const OPS_CONTEXT_FILE = process.env.OPS_CONTEXT_FILE || '/srv/codex-ops/OPS_CONTEXT.md';
 const RUNBOOK_FILE = process.env.RUNBOOK_FILE || '/srv/codex-ops/RUNBOOK_OPENCLAW.md';
+const GLOBAL_CHANGELOG_FILE = process.env.GLOBAL_CHANGELOG_FILE || '/srv/codex-ops/CHANGELOG.md';
 const HOST_LABEL = process.env.HOST_LABEL || os.hostname();
 const ASSISTANT_LANGUAGE = (process.env.ASSISTANT_LANGUAGE || 'Russian').trim() || 'Russian';
 const HISTORY_ITEMS = Math.max(0, Number(process.env.HISTORY_ITEMS || '8') || 8);
@@ -29,6 +30,7 @@ const TG_RETRY_FALLBACK_DELAY_MS = Math.max(500, Number(process.env.TG_RETRY_FAL
 const TG_RETRY_MAX_WAIT_MS = Math.max(1000, Number(process.env.TG_RETRY_MAX_WAIT_MS || '120000') || 120000);
 const HISTORICAL_INCIDENT_LIMIT = Math.max(1000, Number(process.env.HISTORICAL_INCIDENT_LIMIT || '4000') || 4000);
 const CODEX_DEVICE_AUTH_TIMEOUT_MS = Math.max(120000, Number(process.env.CODEX_DEVICE_AUTH_TIMEOUT_MS || '900000') || 900000);
+const CODEX_EXEC_TIMEOUT_MS = Math.max(0, Number(process.env.CODEX_EXEC_TIMEOUT_MS || '0') || 0);
 let offset = 0;
 let busy = false;
 let authFlow = null;
@@ -45,6 +47,18 @@ function clip(text, limit = 1200) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatDurationMs(ms) {
+  const value = Math.max(0, Number(ms) || 0);
+  if (value < 1000) return `${value}ms`;
+  const seconds = Math.floor(value / 1000);
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
 }
 
 function normalizeMarkdownForTelegram(text) {
@@ -330,18 +344,25 @@ function run(command, args, opts = {}) {
     const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], ...opts });
     let stdout = '';
     let stderr = '';
-    const timeoutMs = opts.timeoutMs || 120000;
-    const timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
+    const timeoutMs = opts.timeoutMs == null ? 120000 : Number(opts.timeoutMs);
+    let timedOut = false;
+    let timer = null;
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGTERM');
+      }, timeoutMs);
+    }
     if (opts.input) child.stdin.end(opts.input); else child.stdin.end();
     child.stdout.on('data', (d) => { stdout += d.toString(); });
     child.stderr.on('data', (d) => { stderr += d.toString(); });
     child.on('close', (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, signal, stdout, stderr });
+      if (timer) clearTimeout(timer);
+      resolve({ code, signal, stdout, stderr, timedOut });
     });
     child.on('error', (error) => {
-      clearTimeout(timer);
-      resolve({ code: 1, signal: null, stdout, stderr: `${stderr}\n${error.stack || error.message}`.trim() });
+      if (timer) clearTimeout(timer);
+      resolve({ code: 1, signal: null, stdout, stderr: `${stderr}\n${error.stack || error.message}`.trim(), timedOut });
     });
   });
 }
@@ -602,7 +623,7 @@ async function runCodex(prompt) {
   const outFile = path.join(STATE_DIR, `codex-${nowStamp()}.txt`);
   await fs.mkdir(STATE_DIR, { recursive: true });
   const args = ['HOME=/var/lib/codexops', `CODEX_HOME=${CODEX_HOME}`, 'codex', 'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--color', 'never', '-C', CODEX_CWD, '-o', outFile, '-'];
-  const result = await run('env', args, { input: prompt, timeoutMs: 600000 });
+  const result = await run('env', args, { input: prompt, timeoutMs: CODEX_EXEC_TIMEOUT_MS > 0 ? CODEX_EXEC_TIMEOUT_MS : null });
   let finalText = '';
   try {
     finalText = (await fs.readFile(outFile, 'utf8')).trim();
@@ -624,7 +645,13 @@ async function runCodex(prompt) {
       '',
     ].join('\n');
     await fs.writeFile(debugFile, debugBody, 'utf8');
-    if (looksLikeCodexSubscription403(combined)) {
+    if (result.timedOut) {
+      finalText = [
+        `Codex run timed out after ${formatDurationMs(CODEX_EXEC_TIMEOUT_MS)}.`,
+        'The task may be large. Increase CODEX_EXEC_TIMEOUT_MS or set it to 0 for no timeout.',
+        `Full diagnostic dump saved to: ${debugFile}`,
+      ].join('\n');
+    } else if (looksLikeCodexSubscription403(combined)) {
       finalText = [
         'Codex could not answer: ChatGPT backend returned 403 for native subscription authentication.',
         '',
@@ -706,6 +733,7 @@ async function buildQuestionPrompt(question, options = {}) {
   const paths = projectPaths(activeProject);
   const opsContext = await readMaybe(OPS_CONTEXT_FILE, 25000);
   const globalRunbook = await readMaybe(RUNBOOK_FILE, 12000);
+  const globalChangelog = await readMaybe(GLOBAL_CHANGELOG_FILE, 12000);
   const projectContext = await readMaybe(paths.context, 22000);
   const projectRunbook = await readMaybe(paths.runbook, 12000);
   const projectNotes = await readMaybe(paths.notes, 14000);
@@ -718,6 +746,9 @@ async function buildQuestionPrompt(question, options = {}) {
     'Secondary mission: broader server setup and diagnostics.',
     `Active project for this chat: ${activeProject}.`,
     'Respect the active project first. Only widen scope when the user clearly asks for another system or the evidence requires it.',
+    `Global changelog file: ${GLOBAL_CHANGELOG_FILE}.`,
+    `If the user asks to create or update changelog, write only to ${GLOBAL_CHANGELOG_FILE} unless the user explicitly requests a project-local changelog.`,
+    `Do not create changelog files inside ${INCIDENTS_DIR}.`,
     `Respond in ${ASSISTANT_LANGUAGE}.`,
     'Do the necessary investigation yourself before answering when the question requires checking the server.',
     'Use concise final-answer style only. Do not provide chain-of-thought, hidden reasoning, or long reflective narration.',
@@ -731,6 +762,10 @@ async function buildQuestionPrompt(question, options = {}) {
     '<global_runbook>',
     globalRunbook,
     '</global_runbook>',
+    '',
+    '<global_changelog>',
+    globalChangelog,
+    '</global_changelog>',
     '',
     '<project_context>',
     projectContext,
