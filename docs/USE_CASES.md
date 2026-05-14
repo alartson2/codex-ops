@@ -54,6 +54,7 @@ This helps with work such as:
 - OpenClaw agent setup
 - deployment audits
 - project changelog or documentation generation from live server context
+- visual debugging from Telegram screenshots, UI captures, terminal screenshots, OpenClaw browser state, or deployment error images
 - test-and-fix loops that need multiple commands
 
 Progress updates are explicitly marked as non-final, so the operator can distinguish them from the final report.

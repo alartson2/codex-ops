@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { formatTelegramMessageChunks } from './lib/telegram-format.mjs';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
@@ -11,6 +12,7 @@ const INCIDENTS_DIR = process.env.INCIDENTS_DIR || '/srv/codex-ops/incidents';
 const STATE_DIR = process.env.STATE_DIR || '/var/lib/codexops/state';
 const CHAT_STATE_FILE = process.env.CHAT_STATE_FILE || path.join(STATE_DIR, 'chat-state.json');
 const OFFSET_STATE_FILE = process.env.OFFSET_STATE_FILE || path.join(STATE_DIR, 'telegram-offset.txt');
+const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(STATE_DIR, 'uploads');
 const PROJECTS_DIR = process.env.PROJECTS_DIR || '/srv/codex-ops/projects';
 const DEFAULT_PROJECT = process.env.DEFAULT_PROJECT || 'openclaw';
 const OPENCLAW_CONTAINER = process.env.OPENCLAW_CONTAINER || 'openclaw-yvrh-openclaw-1';
@@ -36,6 +38,9 @@ const CODEX_DEVICE_AUTH_TIMEOUT_MS = Math.max(120000, Number(process.env.CODEX_D
 const CODEX_EXEC_TIMEOUT_MS = Math.max(0, Number(process.env.CODEX_EXEC_TIMEOUT_MS || '0') || 0);
 const CODEX_PROGRESS_INTERVAL_MS = readOptionalNonNegativeMs('CODEX_PROGRESS_INTERVAL_MS', 300000, { minPositive: 60000 });
 const CODEX_PROGRESS_MAX_CHARS = Math.max(500, Number(process.env.CODEX_PROGRESS_MAX_CHARS || '1800') || 1800);
+const TELEGRAM_IMAGE_MAX_BYTES = Math.max(1000000, Number(process.env.TELEGRAM_IMAGE_MAX_BYTES || '10000000') || 10000000);
+const PENDING_IMAGE_TTL_MS = readOptionalNonNegativeMs('PENDING_IMAGE_TTL_MS', 1800000, { minPositive: 60000 });
+const PENDING_IMAGE_MAX_ITEMS = Math.min(10, Math.max(1, Number(process.env.PENDING_IMAGE_MAX_ITEMS || '4') || 4));
 let offset = 0;
 let busy = false;
 let authFlow = null;
@@ -58,6 +63,13 @@ function clip(text, limit = 1200) {
   const value = String(text || '').trim();
   if (value.length <= limit) return value;
   return `${value.slice(0, limit - 3)}...`;
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function sleep(ms) {
@@ -200,6 +212,152 @@ async function editMessage(chatId, messageId, text, extra = {}) {
 
 async function answerCallbackQuery(callbackQueryId, text = '') {
   return tg('answerCallbackQuery', text ? { callback_query_id: callbackQueryId, text } : { callback_query_id: callbackQueryId });
+}
+
+function imageExtensionFromMime(mimeType) {
+  const value = String(mimeType || '').toLowerCase();
+  if (value === 'image/jpeg' || value === 'image/jpg') return '.jpg';
+  if (value === 'image/png') return '.png';
+  if (value === 'image/webp') return '.webp';
+  if (value === 'image/gif') return '.gif';
+  return '';
+}
+
+function imageExtensionFromName(name) {
+  const ext = path.extname(String(name || '')).toLowerCase();
+  return ['.jpg', '.jpeg', '.png', '.webp', '.gif'].includes(ext) ? (ext === '.jpeg' ? '.jpg' : ext) : '';
+}
+
+function sanitizeUploadName(name) {
+  return String(name || 'image')
+    .replace(/[^\w.-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'image';
+}
+
+function selectTelegramImageAttachment(msg) {
+  const photos = Array.isArray(msg && msg.photo) ? msg.photo : [];
+  if (photos.length) {
+    const photo = photos.reduce((best, item) => ((Number(item.file_size) || 0) > (Number(best.file_size) || 0) ? item : best), photos[photos.length - 1]);
+    return {
+      source: 'photo',
+      fileId: photo.file_id,
+      fileUniqueId: photo.file_unique_id || '',
+      fileSize: Number(photo.file_size) || 0,
+      mimeType: 'image/jpeg',
+      originalName: `telegram-photo-${msg.message_id || nowStamp()}.jpg`,
+    };
+  }
+  const document = msg && msg.document;
+  if (document) {
+    const mimeType = String(document.mime_type || '');
+    const originalName = document.file_name || `telegram-image-${msg.message_id || nowStamp()}`;
+    const supportedImageExt = imageExtensionFromMime(mimeType) || imageExtensionFromName(originalName);
+    if (mimeType.toLowerCase().startsWith('image/') || supportedImageExt) {
+      if (!supportedImageExt) {
+        return {
+          unsupported: true,
+          source: 'document',
+          mimeType,
+          originalName,
+          fileSize: Number(document.file_size) || 0,
+        };
+      }
+      return {
+        source: 'document',
+        fileId: document.file_id,
+        fileUniqueId: document.file_unique_id || '',
+        fileSize: Number(document.file_size) || 0,
+        mimeType: mimeType || 'image/*',
+        originalName,
+      };
+    }
+    return {
+      unsupported: true,
+      source: 'document',
+      mimeType,
+      originalName,
+      fileSize: Number(document.file_size) || 0,
+    };
+  }
+  return null;
+}
+
+function normalizePendingImage(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  const filePath = String(entry.path || '').trim();
+  if (!filePath) return null;
+  const root = path.resolve(UPLOADS_DIR);
+  const resolved = path.resolve(filePath);
+  if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) return null;
+  const ts = entry.ts || new Date().toISOString();
+  const ageMs = Date.now() - (Date.parse(ts) || Date.now());
+  if (PENDING_IMAGE_TTL_MS > 0 && ageMs > PENDING_IMAGE_TTL_MS) return null;
+  return {
+    path: resolved,
+    originalName: sanitizeUploadName(entry.originalName || path.basename(resolved)),
+    mimeType: String(entry.mimeType || 'image/*').slice(0, 80),
+    size: Math.max(0, Number(entry.size) || 0),
+    source: String(entry.source || 'telegram').slice(0, 40),
+    ts,
+  };
+}
+
+function formatImageList(images) {
+  const items = Array.isArray(images) ? images.map(normalizePendingImage).filter(Boolean) : [];
+  if (!items.length) return '(none)';
+  return items.map((image, index) => {
+    const details = [image.mimeType, image.size ? formatBytes(image.size) : 'size unknown'].filter(Boolean).join(', ');
+    return `${index + 1}. ${image.originalName} (${details}) path: ${image.path}`;
+  }).join('\n');
+}
+
+function imageHistorySuffix(images) {
+  const items = Array.isArray(images) ? images.map(normalizePendingImage).filter(Boolean) : [];
+  if (!items.length) return '';
+  const names = items.map((image) => image.originalName).join(', ');
+  return `[Telegram image attachments: ${names}]`;
+}
+
+async function downloadTelegramImage(attachment, msg) {
+  if (!attachment || !attachment.fileId) throw new Error('Telegram image has no file_id.');
+  if (attachment.fileSize > TELEGRAM_IMAGE_MAX_BYTES) {
+    throw new Error(`Image is too large: ${formatBytes(attachment.fileSize)}. Limit: ${formatBytes(TELEGRAM_IMAGE_MAX_BYTES)}.`);
+  }
+  const info = await tg('getFile', { file_id: attachment.fileId });
+  const filePath = String(info && info.file_path || '');
+  if (!filePath) throw new Error('Telegram did not return file_path for this image.');
+  const declaredSize = Math.max(Number(info.file_size) || 0, Number(attachment.fileSize) || 0);
+  if (declaredSize > TELEGRAM_IMAGE_MAX_BYTES) {
+    throw new Error(`Image is too large: ${formatBytes(declaredSize)}. Limit: ${formatBytes(TELEGRAM_IMAGE_MAX_BYTES)}.`);
+  }
+
+  const res = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`);
+  if (!res.ok) throw new Error(`Telegram file download failed with status ${res.status}.`);
+  const contentLength = Number(res.headers.get('content-length')) || 0;
+  if (contentLength > TELEGRAM_IMAGE_MAX_BYTES) {
+    throw new Error(`Image is too large: ${formatBytes(contentLength)}. Limit: ${formatBytes(TELEGRAM_IMAGE_MAX_BYTES)}.`);
+  }
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (buffer.length > TELEGRAM_IMAGE_MAX_BYTES) {
+    throw new Error(`Image is too large: ${formatBytes(buffer.length)}. Limit: ${formatBytes(TELEGRAM_IMAGE_MAX_BYTES)}.`);
+  }
+
+  const ext = imageExtensionFromMime(attachment.mimeType) || imageExtensionFromName(attachment.originalName) || imageExtensionFromName(filePath) || '.jpg';
+  const baseName = sanitizeUploadName(path.basename(attachment.originalName || path.basename(filePath), path.extname(attachment.originalName || filePath)));
+  const dayDir = new Date().toISOString().slice(0, 10);
+  const targetDir = path.join(UPLOADS_DIR, dayDir);
+  await fs.mkdir(targetDir, { recursive: true });
+  const target = path.join(targetDir, `${nowStamp()}-${msg.chat.id}-${msg.message_id || 'msg'}-${randomUUID()}-${baseName}${ext}`);
+  await fs.writeFile(target, buffer);
+  return {
+    path: target,
+    originalName: sanitizeUploadName(attachment.originalName || path.basename(filePath)),
+    mimeType: attachment.mimeType || 'image/*',
+    size: buffer.length,
+    source: attachment.source || 'telegram',
+    ts: new Date().toISOString(),
+  };
 }
 
 function stripAnsi(text) {
@@ -500,7 +658,10 @@ function normalizeHistoryEntry(entry) {
 function normalizeChatState(state) {
   const project = normalizeProjectName(state && state.project) || DEFAULT_PROJECT;
   const history = Array.isArray(state && state.history) ? state.history.map(normalizeHistoryEntry).filter(Boolean).slice(-HISTORY_ITEMS) : [];
-  return { project, history };
+  const pendingImages = Array.isArray(state && state.pendingImages)
+    ? state.pendingImages.map(normalizePendingImage).filter(Boolean).slice(-PENDING_IMAGE_MAX_ITEMS)
+    : [];
+  return { project, history, pendingImages };
 }
 
 function emptyChatState(project = DEFAULT_PROJECT) {
@@ -535,6 +696,14 @@ function appendExchange(state, question, answer) {
   let next = appendHistory(state, 'user', question);
   next = appendHistory(next, 'assistant', answer);
   return next;
+}
+
+async function addPendingImages(chatId, images) {
+  const state = await getChatState(chatId);
+  const incoming = Array.isArray(images) ? images.map(normalizePendingImage).filter(Boolean) : [];
+  const pendingImages = [...state.pendingImages, ...incoming].slice(-PENDING_IMAGE_MAX_ITEMS);
+  await setChatState(chatId, { ...state, pendingImages });
+  return pendingImages;
 }
 
 function projectPaths(project) {
@@ -765,7 +934,9 @@ async function collectOpenClawDiag() {
 async function runCodex(prompt, options = {}) {
   const outFile = path.join(STATE_DIR, `codex-${nowStamp()}.txt`);
   await fs.mkdir(STATE_DIR, { recursive: true });
-  const args = ['HOME=/var/lib/codexops', `CODEX_HOME=${CODEX_HOME}`, 'codex', 'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--color', 'never', '-C', CODEX_CWD, '-o', outFile, '-'];
+  const images = Array.isArray(options.images) ? options.images.map(normalizePendingImage).filter(Boolean) : [];
+  const imageArgs = images.flatMap((image) => ['--image', image.path]);
+  const args = ['HOME=/var/lib/codexops', `CODEX_HOME=${CODEX_HOME}`, 'codex', 'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--color', 'never', '-C', CODEX_CWD, '-o', outFile, ...imageArgs, '-'];
   const progress = createCodexProgressReporter({ chatId: options.chatId });
   const result = await run('env', args, {
     input: prompt,
@@ -880,6 +1051,7 @@ async function buildQuestionPrompt(question, options = {}) {
   const chatState = options.chatId == null ? emptyChatState(DEFAULT_PROJECT) : await getChatState(options.chatId);
   const activeProject = normalizeProjectName(options.project || chatState.project) || DEFAULT_PROJECT;
   const paths = projectPaths(activeProject);
+  const attachmentsText = formatImageList(options.images || options.attachments || []);
   const opsContext = await readMaybe(OPS_CONTEXT_FILE, 25000);
   const globalRunbook = await readMaybe(RUNBOOK_FILE, 12000);
   const projectContext = await readMaybe(paths.context, 22000);
@@ -904,6 +1076,7 @@ async function buildQuestionPrompt(question, options = {}) {
     'Do the necessary investigation yourself before answering when the question requires checking the server.',
     'Use concise final-answer style only. Do not provide chain-of-thought, hidden reasoning, or long reflective narration.',
     'For long-running tasks, emit short visible progress updates when meaningful milestones happen. These updates are not final answers.',
+    'When Telegram image attachments are present, inspect the images passed via codex exec --image and answer using their visual content.',
     'Prefer direct practical answers and mention real uncertainty briefly when needed.',
     'Some project workspaces may live inside the OpenClaw container rather than on the host.',
     '',
@@ -939,6 +1112,10 @@ async function buildQuestionPrompt(question, options = {}) {
     historicalText,
     '</historical_incident>',
     '',
+    '<telegram_image_attachments>',
+    attachmentsText,
+    '</telegram_image_attachments>',
+    '',
     '<user_request>',
     question,
     '</user_request>',
@@ -953,6 +1130,7 @@ async function renderContext(chatId) {
     `Host: ${HOST_LABEL}`,
     `Active project: ${chatState.project}`,
     `History items kept: ${chatState.history.length}/${HISTORY_ITEMS}`,
+    `Pending images: ${chatState.pendingImages.length}/${PENDING_IMAGE_MAX_ITEMS}`,
     `Project context: ${await fileExists(paths.context) ? paths.context : '(missing)'}`,
     `Project runbook: ${await fileExists(paths.runbook) ? paths.runbook : '(missing)'}`,
     `Project changelog: ${await fileExists(paths.changelog) ? paths.changelog : '(missing)'}`,
@@ -1028,6 +1206,87 @@ async function handleCallback(callbackQuery) {
   await answerCallbackQuery(callbackQuery.id, 'Unknown action');
 }
 
+async function runUserCodexRequest(chatId, question, extraImages = []) {
+  if (busy) {
+    await sendMessage(chatId, 'Another request is already in progress.');
+    return;
+  }
+  busy = true;
+  try {
+    const state = await getChatState(chatId);
+    const images = [...state.pendingImages, ...extraImages.map(normalizePendingImage).filter(Boolean)].slice(-PENDING_IMAGE_MAX_ITEMS);
+    const imageLine = images.length ? `\nImages: ${images.length}` : '';
+    await sendMessage(chatId, `Working on it...\nProject: ${state.project}${imageLine}`);
+    const answer = await runCodex(await buildQuestionPrompt(question, { chatId, images }), { chatId, images });
+    const historyQuestion = [question, imageHistorySuffix(images)].filter(Boolean).join('\n');
+    await updateChatState(chatId, async (current) => appendExchange({ ...current, pendingImages: [] }, historyQuestion, answer));
+    await sendMessage(chatId, answer);
+  } finally {
+    busy = false;
+  }
+}
+
+async function handleImageMessage(chatId, msg, text, attachment) {
+  if (!ALLOWED_CHAT_IDS.has(String(chatId))) {
+    await sendMessage(chatId, 'Access denied.');
+    return;
+  }
+  if (attachment && attachment.unsupported) {
+    await sendMessage(chatId, [
+      'This file type is not supported yet.',
+      `Received: ${attachment.originalName} (${attachment.mimeType || 'unknown type'}, ${attachment.fileSize ? formatBytes(attachment.fileSize) : 'size unknown'})`,
+      'Send a Telegram photo or an image document instead.',
+    ].join('\n'));
+    return;
+  }
+  if (busy) {
+    await sendMessage(chatId, 'Another request is already in progress. Please send the image again when it finishes.');
+    return;
+  }
+
+  let image = null;
+  try {
+    image = await downloadTelegramImage(attachment, msg);
+  } catch (error) {
+    await sendMessage(chatId, `Could not download image: ${error.message}`);
+    return;
+  }
+
+  const rawQuestion = String(text || '').trim();
+  const question = rawQuestion.startsWith('/ask ') ? rawQuestion.slice(5).trim() : rawQuestion;
+  if (!question) {
+    const pending = await addPendingImages(chatId, [image]);
+    await sendMessage(chatId, [
+      'Image received and saved for the next question.',
+      `Stored images: ${pending.length}/${PENDING_IMAGE_MAX_ITEMS}.`,
+      PENDING_IMAGE_TTL_MS > 0 ? `Expires after: ${formatDurationMs(PENDING_IMAGE_TTL_MS)}.` : 'Image expiration is disabled.',
+      'Send a text question now, or send another image to attach more.',
+    ].join('\n'));
+    return;
+  }
+
+  await runUserCodexRequest(chatId, question, [image]);
+}
+
+async function handleMessage(msg) {
+  const chatId = msg && msg.chat && msg.chat.id;
+  if (!chatId) return;
+  if (!ALLOWED_CHAT_IDS.has(String(chatId))) {
+    await sendMessage(chatId, 'Access denied.');
+    return;
+  }
+  const attachment = selectTelegramImageAttachment(msg);
+  if (attachment) {
+    await handleImageMessage(chatId, msg, msg.caption || '', attachment);
+    return;
+  }
+  if (msg.document) {
+    await sendMessage(chatId, 'This file type is not supported yet. Send a Telegram photo or an image document.');
+    return;
+  }
+  await handle(chatId, msg.text || '');
+}
+
 async function handle(chatId, text) {
   const trimmed = (text || '').trim();
   if (!trimmed) return;
@@ -1039,6 +1298,7 @@ async function handle(chatId, text) {
     await sendMessage(chatId, [
       `codex-ops on ${HOST_LABEL}`,
       'Regular text messages are treated as direct questions to Codex.',
+      'Telegram photos and image documents can be sent with a caption, or saved for the next text question.',
       'Commands:',
       '/ask <question>',
       '/status',
@@ -1174,40 +1434,14 @@ async function handle(chatId, text) {
       await sendMessage(chatId, 'Usage: /ask <question>');
       return;
     }
-    if (busy) {
-      await sendMessage(chatId, 'Another request is already in progress.');
-      return;
-    }
-    busy = true;
-    try {
-      const state = await getChatState(chatId);
-      await sendMessage(chatId, `Working on it...\nProject: ${state.project}`);
-      const answer = await runCodex(await buildQuestionPrompt(question, { chatId }), { chatId });
-      await updateChatState(chatId, async (current) => appendExchange(current, question, answer));
-      await sendMessage(chatId, answer);
-    } finally {
-      busy = false;
-    }
+    await runUserCodexRequest(chatId, question);
     return;
   }
   if (trimmed.startsWith('/')) {
     await sendMessage(chatId, 'Unknown command. Use /help');
     return;
   }
-  if (busy) {
-    await sendMessage(chatId, 'Another request is already in progress.');
-    return;
-  }
-  busy = true;
-  try {
-    const state = await getChatState(chatId);
-    await sendMessage(chatId, `Working on it...\nProject: ${state.project}`);
-    const answer = await runCodex(await buildQuestionPrompt(trimmed, { chatId }), { chatId });
-    await updateChatState(chatId, async (current) => appendExchange(current, trimmed, answer));
-    await sendMessage(chatId, answer);
-  } finally {
-    busy = false;
-  }
+  await runUserCodexRequest(chatId, trimmed);
 }
 
 async function poll() {
@@ -1238,9 +1472,10 @@ async function poll() {
         const msg = update.message;
         if (!msg || !msg.chat) continue;
         try {
-          await handle(msg.chat.id, msg.text || '');
+          await handleMessage(msg);
         } catch (error) {
-          console.error(`[bot-error] chat=${msg.chat.id} text=${JSON.stringify((msg.text || '').slice(0, 300))} error=${error && (error.stack || error.message)}`);
+          const incomingText = msg.text || msg.caption || '';
+          console.error(`[bot-error] chat=${msg.chat.id} text=${JSON.stringify(incomingText.slice(0, 300))} error=${error && (error.stack || error.message)}`);
           try {
             await sendMessage(msg.chat.id, `Request failed: ${error.message}`);
           } catch {}
@@ -1255,6 +1490,7 @@ async function poll() {
 async function main() {
   if (!BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN is not set');
   await fs.mkdir(STATE_DIR, { recursive: true });
+  await fs.mkdir(UPLOADS_DIR, { recursive: true });
   await fs.mkdir(PROJECTS_DIR, { recursive: true });
   await ensureProjectFiles('openclaw');
   await ensureProjectFiles('server');

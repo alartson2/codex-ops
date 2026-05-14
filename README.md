@@ -9,6 +9,7 @@ Host-level Telegram operations bot for Codex CLI, designed for OpenClaw, remote 
 - ask Codex to investigate issues directly from the server
 - build, inspect, and test remote agent systems where they actually run
 - run targeted diagnostics (`/status`, `/diag openclaw`)
+- send Telegram photos or image documents to Codex as visual context
 - keep short per-chat context with project switching
 - perform native Codex device login through Telegram (`/codex login`)
 - protect Telegram from flood output with message chunk limits and safe fallback behavior
@@ -38,6 +39,7 @@ The goal is not to replace SSH completely. The goal is to make the common loop f
 - Persistent lightweight chat state and project-aware context
 - Out-of-the-box project memory files (`CHANGELOG.md`, `NOTES.md`, context, and runbooks)
 - OpenClaw-focused diagnostics and incident note generation
+- Telegram image input for Codex vision-capable investigations
 - Periodic progress updates for long-running Codex tasks
 - Telegram HTML rendering for Codex Markdown output
 - 429-aware Telegram send retry logic and anti-flood truncation
@@ -96,6 +98,8 @@ sudo systemctl status --no-pager codex-telegram-bot.service
 ## Telegram commands
 
 - normal text message: ask Codex directly
+- photo/image with caption: ask Codex about that image
+- photo/image without caption: save it for the next text question
 - `/ask <question>`
 - `/status`
 - `/diag openclaw`

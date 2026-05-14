@@ -108,6 +108,7 @@ prepare_paths() {
   install -d -m 0755 /srv/codex-ops/projects/openclaw
   install -d -m 0755 /srv/codex-ops/projects/server
   install -d -m 0755 /var/lib/codexops/state
+  install -d -m 0755 /var/lib/codexops/state/uploads
   install -d -m 0755 /var/lib/codexops/.codex
 }
 
@@ -219,6 +220,7 @@ TELEGRAM_BOT_TOKEN=
 ALLOWED_CHAT_IDS=
 INCIDENTS_DIR=/srv/codex-ops/incidents
 STATE_DIR=/var/lib/codexops/state
+UPLOADS_DIR=/var/lib/codexops/state/uploads
 OPENCLAW_CONTAINER=${OPENCLAW_CONTAINER}
 CODEX_CWD=/srv/codex-ops/incidents
 HOST_LABEL=$(hostname)

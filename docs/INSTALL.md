@@ -42,6 +42,7 @@ Recommended base values:
 
 - `INCIDENTS_DIR=/srv/codex-ops/incidents`
 - `STATE_DIR=/var/lib/codexops/state`
+- `UPLOADS_DIR=/var/lib/codexops/state/uploads`
 - `OPENCLAW_CONTAINER=openclaw-yvrh-openclaw-1`
 - `CODEX_CWD=/srv/codex-ops/incidents`
 

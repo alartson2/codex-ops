@@ -11,6 +11,7 @@ All runtime configuration is loaded from `/etc/codex-ops/bot.env`.
 
 - `INCIDENTS_DIR` (default: `/srv/codex-ops/incidents`): incident and diagnostic notes.
 - `STATE_DIR` (default: `/var/lib/codexops/state`): bot offset/chat state/debug logs.
+- `UPLOADS_DIR` (default: `$STATE_DIR/uploads`): downloaded Telegram image attachments passed to `codex exec --image`.
 - `OPENCLAW_CONTAINER` (default: `openclaw-yvrh-openclaw-1`): container used by OpenClaw diagnostics.
 - `CODEX_CWD` (default: `/srv/codex-ops/incidents`): working directory for `codex exec`.
 - `HOST_LABEL` (default: hostname): display label in bot responses.
@@ -21,6 +22,12 @@ All runtime configuration is loaded from `/etc/codex-ops/bot.env`.
 - `HISTORY_ITEMS` (default: `8`): number of recent user/assistant items kept per chat.
 - `HISTORY_ITEM_CHARS` (default: `1400`): max chars per history item.
 - `HISTORICAL_INCIDENT_LIMIT` (default: `4000`): max chars of latest incident fed into prompt.
+
+## Telegram image input tuning
+
+- `TELEGRAM_IMAGE_MAX_BYTES` (default: `10000000`): max downloaded image size. Larger Telegram photos or image documents are rejected before reaching Codex.
+- `PENDING_IMAGE_TTL_MS` (default: `1800000`): how long a captionless image remains attached to the next text question. Set `0` to disable expiration.
+- `PENDING_IMAGE_MAX_ITEMS` (default: `4`): max pending images per chat. Higher values are capped in code.
 
 ## Telegram output and anti-flood tuning
 
@@ -76,6 +83,7 @@ TELEGRAM_BOT_TOKEN=<redacted>
 ALLOWED_CHAT_IDS=123456789,987654321
 INCIDENTS_DIR=/srv/codex-ops/incidents
 STATE_DIR=/var/lib/codexops/state
+UPLOADS_DIR=/var/lib/codexops/state/uploads
 OPENCLAW_CONTAINER=openclaw-yvrh-openclaw-1
 CODEX_CWD=/srv/codex-ops/incidents
 HOST_LABEL=prod-vps-1
@@ -89,6 +97,9 @@ TG_RETRY_ATTEMPTS=3
 TG_RETRY_FALLBACK_DELAY_MS=2000
 TG_RETRY_MAX_WAIT_MS=120000
 HISTORICAL_INCIDENT_LIMIT=4000
+TELEGRAM_IMAGE_MAX_BYTES=10000000
+PENDING_IMAGE_TTL_MS=1800000
+PENDING_IMAGE_MAX_ITEMS=4
 CODEX_DEVICE_AUTH_TIMEOUT_MS=900000
 CODEX_EXEC_TIMEOUT_MS=0
 CODEX_PROGRESS_INTERVAL_MS=300000
