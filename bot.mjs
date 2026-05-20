@@ -386,13 +386,33 @@ function parseDeviceAuthDetails(text) {
   };
 }
 
+function lineStartsToolTranscript(line) {
+  const value = String(line || '').trim();
+  if (!value) return false;
+  return (
+    /^(apply patch|apply_patch|patch:\s|diff --git\b|\*\*\* Begin Patch|\*\*\* End Patch)/i.test(value)
+    || /^(shell|shell command|shell_command|functions\.shell_command|python|node|bash|powershell)\b/i.test(value)
+    || /^(index [0-9a-f]{7,}\.\.[0-9a-f]{7,}|--- a\/|\+\+\+ b\/|--- \/|\+\+\+ \/|@@)/i.test(value)
+  );
+}
+
+function stripCodexToolTranscript(text) {
+  const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  const kept = [];
+  for (const line of lines) {
+    if (lineStartsToolTranscript(line)) break;
+    kept.push(line);
+  }
+  return kept.join('\n').trim();
+}
+
 function extractCodexAssistantFallback(stderrText, limit = 2800) {
   const clean = stripAnsi(stderrText || '');
   const re = /(?:^|\n)codex\n([\s\S]*?)(?=\n(?:exec|tokens used|user)\n|$)/g;
   let match;
   let last = '';
   while ((match = re.exec(clean)) !== null) {
-    const candidate = String(match[1] || '').trim();
+    const candidate = stripCodexToolTranscript(match[1]);
     if (candidate) last = candidate;
   }
   if (!last) return '';

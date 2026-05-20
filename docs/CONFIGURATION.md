@@ -45,7 +45,7 @@ All runtime configuration is loaded from `/etc/codex-ops/bot.env`.
 - `CODEX_EXEC_TIMEOUT_MS` (default: `0`): timeout for `codex exec` runs in milliseconds. Set `0` to disable timeout and wait for real completion.
 - `CODEX_MODEL_CATALOG_TIMEOUT_MS` (default: `30000`): timeout for reading the current Codex model catalog with `codex debug models`.
 - `CODEX_PROGRESS_INTERVAL_MS` (default: `300000`): interval for "Codex progress update" Telegram messages while `codex exec` is still running. Set `0` to disable. Positive values below `60000` are raised to `60000`.
-- `CODEX_PROGRESS_MAX_CHARS` (default: `1800`): max length of streamed assistant progress copied into each progress update.
+- `CODEX_PROGRESS_MAX_CHARS` (default: `1800`): max length of streamed assistant progress copied into each progress update. Tool transcripts, patch output, and diffs are filtered out of progress updates.
 
 ## Codex model controls
 
