@@ -35,6 +35,7 @@ The goal is not to replace SSH completely. The goal is to make the common loop f
 
 - Telegram bot frontend with access control (`ALLOWED_CHAT_IDS`)
 - Codex CLI integration (`codex exec`) for investigations and Q/A
+- Telegram controls for Codex model and reasoning effort
 - Native subscription device auth flow (`/codex login`)
 - Persistent lightweight chat state and project-aware context
 - Out-of-the-box project memory files (`CHANGELOG.md`, `NOTES.md`, context, and runbooks)
@@ -110,6 +111,11 @@ sudo systemctl status --no-pager codex-telegram-bot.service
 - `/project new <name>`
 - `/context show`
 - `/session reset`
+- `/codex settings`
+- `/codex model`
+- `/codex model <slug|default>`
+- `/codex reasoning`
+- `/codex reasoning <effort|default>`
 - `/codex login`
 - `/codex login status`
 - `/codex login cancel`

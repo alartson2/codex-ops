@@ -43,8 +43,21 @@ All runtime configuration is loaded from `/etc/codex-ops/bot.env`.
 
 - `CODEX_DEVICE_AUTH_TIMEOUT_MS` (default: `900000`): timeout for `/codex login` device auth flow.
 - `CODEX_EXEC_TIMEOUT_MS` (default: `0`): timeout for `codex exec` runs in milliseconds. Set `0` to disable timeout and wait for real completion.
+- `CODEX_MODEL_CATALOG_TIMEOUT_MS` (default: `30000`): timeout for reading the current Codex model catalog with `codex debug models`.
 - `CODEX_PROGRESS_INTERVAL_MS` (default: `300000`): interval for "Codex progress update" Telegram messages while `codex exec` is still running. Set `0` to disable. Positive values below `60000` are raised to `60000`.
 - `CODEX_PROGRESS_MAX_CHARS` (default: `1800`): max length of streamed assistant progress copied into each progress update.
+
+## Codex model controls
+
+Telegram model controls are stored in chat state, not in `config.toml`.
+
+- `/codex settings`: show current model and reasoning settings.
+- `/codex model`: list models from the current `codex debug models` catalog and show buttons.
+- `/codex model <slug>`: set a Telegram model override for future `codex exec` runs in this chat.
+- `/codex model default`: clear the model override and use Codex config/default behavior.
+- `/codex reasoning`: list reasoning levels supported by the current model.
+- `/codex reasoning <effort>`: set a Telegram reasoning override for future `codex exec` runs in this chat.
+- `/codex reasoning default`: clear the reasoning override and use Codex config/model default behavior.
 
 ## Suggested presets
 
@@ -102,6 +115,7 @@ PENDING_IMAGE_TTL_MS=1800000
 PENDING_IMAGE_MAX_ITEMS=4
 CODEX_DEVICE_AUTH_TIMEOUT_MS=900000
 CODEX_EXEC_TIMEOUT_MS=0
+CODEX_MODEL_CATALOG_TIMEOUT_MS=30000
 CODEX_PROGRESS_INTERVAL_MS=300000
 CODEX_PROGRESS_MAX_CHARS=1800
 ```

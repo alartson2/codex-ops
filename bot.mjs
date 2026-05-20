@@ -36,6 +36,7 @@ const TG_RETRY_MAX_WAIT_MS = Math.max(1000, Number(process.env.TG_RETRY_MAX_WAIT
 const HISTORICAL_INCIDENT_LIMIT = Math.max(1000, Number(process.env.HISTORICAL_INCIDENT_LIMIT || '4000') || 4000);
 const CODEX_DEVICE_AUTH_TIMEOUT_MS = Math.max(120000, Number(process.env.CODEX_DEVICE_AUTH_TIMEOUT_MS || '900000') || 900000);
 const CODEX_EXEC_TIMEOUT_MS = Math.max(0, Number(process.env.CODEX_EXEC_TIMEOUT_MS || '0') || 0);
+const CODEX_MODEL_CATALOG_TIMEOUT_MS = readOptionalNonNegativeMs('CODEX_MODEL_CATALOG_TIMEOUT_MS', 30000, { minPositive: 5000 });
 const CODEX_PROGRESS_INTERVAL_MS = readOptionalNonNegativeMs('CODEX_PROGRESS_INTERVAL_MS', 300000, { minPositive: 60000 });
 const CODEX_PROGRESS_MAX_CHARS = Math.max(500, Number(process.env.CODEX_PROGRESS_MAX_CHARS || '1800') || 1800);
 const TELEGRAM_IMAGE_MAX_BYTES = Math.max(1000000, Number(process.env.TELEGRAM_IMAGE_MAX_BYTES || '10000000') || 10000000);
@@ -98,6 +99,16 @@ function compactIncidentForPrompt(text, limit = HISTORICAL_INCIDENT_LIMIT) {
 
 function normalizeProjectName(name) {
   return String(name || '').trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function normalizeCodexSettingValue(value) {
+  const text = String(value || '').trim();
+  if (!text || text.length > 80) return '';
+  return /^[A-Za-z0-9._:-]+$/.test(text) ? text : '';
+}
+
+function quoteTomlString(value) {
+  return JSON.stringify(String(value || ''));
 }
 
 function looksLikeCodexSubscription403(text) {
@@ -621,6 +632,89 @@ async function sh(script, timeoutMs = 120000) {
   return run('bash', ['-lc', script], { timeoutMs });
 }
 
+async function loadCodexModelCatalog() {
+  const result = await run('env', ['HOME=/var/lib/codexops', `CODEX_HOME=${CODEX_HOME}`, 'codex', 'debug', 'models'], {
+    timeoutMs: CODEX_MODEL_CATALOG_TIMEOUT_MS,
+  });
+  if (result.code !== 0 || !String(result.stdout || '').trim()) {
+    throw new Error((result.stderr || result.stdout || 'codex debug models returned no output').trim());
+  }
+  let parsed = null;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch (error) {
+    throw new Error(`Could not parse codex model catalog JSON: ${error.message}`);
+  }
+  const rawModels = Array.isArray(parsed && parsed.models) ? parsed.models : [];
+  return rawModels
+    .map((model) => {
+      const slug = normalizeCodexSettingValue(model && model.slug);
+      if (!slug) return null;
+      const supported = Array.isArray(model.supported_reasoning_levels) ? model.supported_reasoning_levels : [];
+      return {
+        slug,
+        displayName: String(model.display_name || slug).slice(0, 80),
+        description: String(model.description || '').slice(0, 240),
+        defaultReasoning: normalizeCodexSettingValue(model.default_reasoning_level),
+        reasoningLevels: supported.map((item) => ({
+          effort: normalizeCodexSettingValue(item && item.effort),
+          description: String(item && item.description || '').slice(0, 160),
+        })).filter((item) => item.effort),
+        visibility: String(model.visibility || ''),
+        priority: Number(model.priority) || 0,
+      };
+    })
+    .filter(Boolean)
+    .filter((model) => model.visibility !== 'hidden')
+    .sort((a, b) => (b.priority - a.priority) || a.slug.localeCompare(b.slug));
+}
+
+async function readCodexConfigDefaults() {
+  const file = path.join(CODEX_HOME, 'config.toml');
+  try {
+    const text = await fs.readFile(file, 'utf8');
+    const model = text.match(/^\s*model\s*=\s*["']([^"']+)["']/m);
+    const reasoning = text.match(/^\s*reasoning_effort\s*=\s*["']([^"']+)["']/m);
+    return {
+      model: normalizeCodexSettingValue(model && model[1]),
+      reasoningEffort: normalizeCodexSettingValue(reasoning && reasoning[1]),
+    };
+  } catch {
+    return { model: '', reasoningEffort: '' };
+  }
+}
+
+function modelBySlug(models, slug) {
+  const selected = normalizeCodexSettingValue(slug);
+  return Array.isArray(models) ? models.find((model) => model.slug === selected) || null : null;
+}
+
+function reasoningLevelsForModel(models, slug) {
+  const model = modelBySlug(models, slug);
+  if (model && model.reasoningLevels.length) return model.reasoningLevels;
+  const seen = new Set();
+  const levels = [];
+  for (const item of Array.isArray(models) ? models : []) {
+    for (const level of item.reasoningLevels || []) {
+      if (seen.has(level.effort)) continue;
+      seen.add(level.effort);
+      levels.push(level);
+    }
+  }
+  return levels;
+}
+
+function effectiveCodexSettings(state, defaults = {}) {
+  const codexModel = normalizeCodexSettingValue(state && state.codexModel);
+  const codexReasoningEffort = normalizeCodexSettingValue(state && state.codexReasoningEffort);
+  return {
+    model: codexModel || normalizeCodexSettingValue(defaults.model),
+    reasoningEffort: codexReasoningEffort || normalizeCodexSettingValue(defaults.reasoningEffort),
+    modelOverride: Boolean(codexModel),
+    reasoningOverride: Boolean(codexReasoningEffort),
+  };
+}
+
 async function fileExists(file) {
   try {
     await fs.access(file);
@@ -661,7 +755,9 @@ function normalizeChatState(state) {
   const pendingImages = Array.isArray(state && state.pendingImages)
     ? state.pendingImages.map(normalizePendingImage).filter(Boolean).slice(-PENDING_IMAGE_MAX_ITEMS)
     : [];
-  return { project, history, pendingImages };
+  const codexModel = normalizeCodexSettingValue(state && state.codexModel);
+  const codexReasoningEffort = normalizeCodexSettingValue(state && state.codexReasoningEffort);
+  return { project, history, pendingImages, codexModel, codexReasoningEffort };
 }
 
 function emptyChatState(project = DEFAULT_PROJECT) {
@@ -936,7 +1032,12 @@ async function runCodex(prompt, options = {}) {
   await fs.mkdir(STATE_DIR, { recursive: true });
   const images = Array.isArray(options.images) ? options.images.map(normalizePendingImage).filter(Boolean) : [];
   const imageArgs = images.flatMap((image) => ['--image', image.path]);
-  const args = ['HOME=/var/lib/codexops', `CODEX_HOME=${CODEX_HOME}`, 'codex', 'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--color', 'never', '-C', CODEX_CWD, '-o', outFile, ...imageArgs, '-'];
+  const chatState = options.chatId == null ? null : await getChatState(options.chatId);
+  const selectedModel = normalizeCodexSettingValue(options.model || chatState && chatState.codexModel);
+  const selectedReasoning = normalizeCodexSettingValue(options.reasoningEffort || chatState && chatState.codexReasoningEffort);
+  const modelArgs = selectedModel ? ['-m', selectedModel] : [];
+  const reasoningArgs = selectedReasoning ? ['-c', `reasoning_effort=${quoteTomlString(selectedReasoning)}`] : [];
+  const args = ['HOME=/var/lib/codexops', `CODEX_HOME=${CODEX_HOME}`, 'codex', 'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--color', 'never', '-C', CODEX_CWD, '-o', outFile, ...modelArgs, ...reasoningArgs, ...imageArgs, '-'];
   const progress = createCodexProgressReporter({ chatId: options.chatId });
   const result = await run('env', args, {
     input: prompt,
@@ -1126,9 +1227,13 @@ async function renderContext(chatId) {
   const chatState = await getChatState(chatId);
   const projects = await listProjects();
   const paths = projectPaths(chatState.project);
+  const defaults = await readCodexConfigDefaults();
+  const settings = effectiveCodexSettings(chatState, defaults);
   return [
     `Host: ${HOST_LABEL}`,
     `Active project: ${chatState.project}`,
+    `Codex model: ${settings.model || '(Codex default)'}${settings.modelOverride ? ' (Telegram override)' : ' (config/default)'}`,
+    `Codex reasoning: ${settings.reasoningEffort || '(Codex default)'}${settings.reasoningOverride ? ' (Telegram override)' : ' (config/default)'}`,
     `History items kept: ${chatState.history.length}/${HISTORY_ITEMS}`,
     `Pending images: ${chatState.pendingImages.length}/${PENDING_IMAGE_MAX_ITEMS}`,
     `Project context: ${await fileExists(paths.context) ? paths.context : '(missing)'}`,
@@ -1150,6 +1255,167 @@ function buildProjectsKeyboard(projects, activeProject) {
     { text: 'Reset session', callback_data: 'project:reset' },
   ]);
   return { inline_keyboard: rows };
+}
+
+function callbackData(prefix, value) {
+  const data = `${prefix}${value}`;
+  return data.length <= 64 ? data : '';
+}
+
+function buildCodexSettingsKeyboard(models, state, defaults) {
+  const settings = effectiveCodexSettings(state, defaults);
+  const rows = [
+    [{ text: `Model: ${settings.model || 'Codex default'}`, callback_data: 'codex:models' }],
+    [{ text: `Reasoning: ${settings.reasoningEffort || 'Codex default'}`, callback_data: 'codex:reasoning' }],
+  ];
+  if (settings.modelOverride || settings.reasoningOverride) {
+    rows.push([{ text: 'Clear Telegram overrides', callback_data: 'codex:clear' }]);
+  }
+  const selected = modelBySlug(models, settings.model);
+  if (selected && selected.defaultReasoning && !settings.reasoningOverride) {
+    rows.push([{ text: `Model default reasoning: ${selected.defaultReasoning}`, callback_data: 'codex:reasoning' }]);
+  }
+  return { inline_keyboard: rows };
+}
+
+function buildModelKeyboard(models, currentModel) {
+  const rows = [];
+  for (const model of models.slice(0, 30)) {
+    const data = callbackData('codex:model:', model.slug);
+    if (!data) continue;
+    rows.push([{ text: model.slug === currentModel ? `[active] ${model.displayName}` : model.displayName, callback_data: data }]);
+  }
+  rows.push([{ text: 'Use Codex config/default', callback_data: 'codex:model:default' }]);
+  rows.push([{ text: 'Back to settings', callback_data: 'codex:settings' }]);
+  return { inline_keyboard: rows };
+}
+
+function buildReasoningKeyboard(levels, currentReasoning) {
+  const rows = [];
+  for (const level of levels) {
+    const data = callbackData('codex:reasoning:', level.effort);
+    if (!data) continue;
+    rows.push([{ text: level.effort === currentReasoning ? `[active] ${level.effort}` : level.effort, callback_data: data }]);
+  }
+  rows.push([{ text: 'Use Codex/model default', callback_data: 'codex:reasoning:default' }]);
+  rows.push([{ text: 'Back to settings', callback_data: 'codex:settings' }]);
+  return { inline_keyboard: rows };
+}
+
+function formatModelMenu(models, state, defaults) {
+  const settings = effectiveCodexSettings(state, defaults);
+  const lines = [
+    'Codex model menu',
+    `Current model: ${settings.model || '(Codex default)'}${settings.modelOverride ? ' (Telegram override)' : ' (config/default)'}`,
+    '',
+    'Available models from current Codex catalog:',
+  ];
+  for (const model of models.slice(0, 30)) {
+    const defaultReasoning = model.defaultReasoning ? `, default reasoning ${model.defaultReasoning}` : '';
+    lines.push(`- ${model.slug}: ${model.description || model.displayName}${defaultReasoning}`);
+  }
+  if (!models.length) lines.push('(no models returned by codex debug models)');
+  return lines.join('\n');
+}
+
+function formatReasoningMenu(levels, state, defaults, modelSlug) {
+  const settings = effectiveCodexSettings(state, defaults);
+  const lines = [
+    'Codex reasoning menu',
+    `Model for reasoning levels: ${modelSlug || '(unknown)'}`,
+    `Current reasoning: ${settings.reasoningEffort || '(Codex default)'}${settings.reasoningOverride ? ' (Telegram override)' : ' (config/default)'}`,
+    '',
+    'Available reasoning levels from current Codex catalog:',
+  ];
+  for (const level of levels) lines.push(`- ${level.effort}: ${level.description || '(no description)'}`);
+  if (!levels.length) lines.push('(no reasoning levels returned by codex debug models)');
+  return lines.join('\n');
+}
+
+async function sendCodexSettingsMenu(chatId, promptText = '') {
+  const state = await getChatState(chatId);
+  const defaults = await readCodexConfigDefaults();
+  let models = [];
+  let catalogError = '';
+  try {
+    models = await loadCodexModelCatalog();
+  } catch (error) {
+    catalogError = error.message || String(error);
+  }
+  const settings = effectiveCodexSettings(state, defaults);
+  const modelKnown = !settings.model || Boolean(modelBySlug(models, settings.model));
+  const lines = [
+    'Codex settings',
+    `Model: ${settings.model || '(Codex default)'}${settings.modelOverride ? ' (Telegram override)' : ' (config/default)'}`,
+    `Reasoning: ${settings.reasoningEffort || '(Codex default)'}${settings.reasoningOverride ? ' (Telegram override)' : ' (config/default)'}`,
+    `Catalog models: ${models.length || '(unavailable)'}`,
+  ];
+  if (!modelKnown) lines.push(`Warning: selected model is not in the current Codex catalog: ${settings.model}`);
+  if (catalogError) lines.push(`Catalog error: ${clip(catalogError, 600)}`);
+  if (promptText) lines.push('', promptText);
+  await sendMessage(chatId, lines.join('\n'), { reply_markup: buildCodexSettingsKeyboard(models, state, defaults) });
+}
+
+async function sendCodexModelMenu(chatId) {
+  const state = await getChatState(chatId);
+  const defaults = await readCodexConfigDefaults();
+  const models = await loadCodexModelCatalog();
+  const settings = effectiveCodexSettings(state, defaults);
+  await sendMessage(chatId, formatModelMenu(models, state, defaults), { reply_markup: buildModelKeyboard(models, settings.model) });
+}
+
+async function sendCodexReasoningMenu(chatId) {
+  const state = await getChatState(chatId);
+  const defaults = await readCodexConfigDefaults();
+  const models = await loadCodexModelCatalog();
+  const settings = effectiveCodexSettings(state, defaults);
+  const modelSlug = settings.model || (models[0] && models[0].slug) || '';
+  const levels = reasoningLevelsForModel(models, modelSlug);
+  await sendMessage(chatId, formatReasoningMenu(levels, state, defaults, modelSlug), { reply_markup: buildReasoningKeyboard(levels, settings.reasoningEffort) });
+}
+
+async function setCodexModel(chatId, value) {
+  const requested = normalizeCodexSettingValue(value);
+  if (!requested || requested === 'default' || requested === 'auto' || requested === 'clear') {
+    await updateChatState(chatId, async (current) => ({ ...current, codexModel: '' }));
+    await sendCodexSettingsMenu(chatId, 'Model override cleared. Codex config/default will be used.');
+    return;
+  }
+  const models = await loadCodexModelCatalog();
+  const selected = modelBySlug(models, requested);
+  if (!selected) {
+    await sendMessage(chatId, `Model is not in the current Codex catalog: ${requested}\nUse /codex model to see available models.`);
+    return;
+  }
+  let reasoningCleared = false;
+  await updateChatState(chatId, async (current) => {
+    const levels = reasoningLevelsForModel(models, requested).map((item) => item.effort);
+    const currentReasoning = normalizeCodexSettingValue(current.codexReasoningEffort);
+    const keepReasoning = !currentReasoning || !levels.length || levels.includes(currentReasoning);
+    reasoningCleared = Boolean(currentReasoning && !keepReasoning);
+    return { ...current, codexModel: requested, codexReasoningEffort: keepReasoning ? currentReasoning : '' };
+  });
+  await sendCodexSettingsMenu(chatId, reasoningCleared ? `Model set to ${requested}. Reasoning override was cleared because this model does not support it.` : `Model set to ${requested}.`);
+}
+
+async function setCodexReasoning(chatId, value) {
+  const requested = normalizeCodexSettingValue(value);
+  if (!requested || requested === 'default' || requested === 'auto' || requested === 'clear') {
+    await updateChatState(chatId, async (current) => ({ ...current, codexReasoningEffort: '' }));
+    await sendCodexSettingsMenu(chatId, 'Reasoning override cleared. Codex config/model default will be used.');
+    return;
+  }
+  const state = await getChatState(chatId);
+  const defaults = await readCodexConfigDefaults();
+  const models = await loadCodexModelCatalog();
+  const settings = effectiveCodexSettings(state, defaults);
+  const levels = reasoningLevelsForModel(models, settings.model);
+  if (levels.length && !levels.some((level) => level.effort === requested)) {
+    await sendMessage(chatId, `Reasoning level is not supported by the current model: ${requested}\nUse /codex reasoning to see available levels.`);
+    return;
+  }
+  await updateChatState(chatId, async (current) => ({ ...current, codexReasoningEffort: requested }));
+  await sendCodexSettingsMenu(chatId, `Reasoning override set to ${requested}.`);
 }
 
 async function sendProjectsMenu(chatId, promptText = '') {
@@ -1201,6 +1467,37 @@ async function handleCallback(callbackQuery) {
     const projects = await listProjects();
     await editMessage(chatId, messageId, `Projects menu\nActive project: ${state.project}\n\nSession history was reset.`, { reply_markup: buildProjectsKeyboard(projects, state.project) });
     await answerCallbackQuery(callbackQuery.id, 'Session reset');
+    return;
+  }
+  if (data === 'codex:settings') {
+    await answerCallbackQuery(callbackQuery.id, 'Codex settings');
+    await sendCodexSettingsMenu(chatId);
+    return;
+  }
+  if (data === 'codex:models') {
+    await answerCallbackQuery(callbackQuery.id, 'Models');
+    await sendCodexModelMenu(chatId);
+    return;
+  }
+  if (data === 'codex:reasoning') {
+    await answerCallbackQuery(callbackQuery.id, 'Reasoning');
+    await sendCodexReasoningMenu(chatId);
+    return;
+  }
+  if (data === 'codex:clear') {
+    await updateChatState(chatId, async (current) => ({ ...current, codexModel: '', codexReasoningEffort: '' }));
+    await answerCallbackQuery(callbackQuery.id, 'Overrides cleared');
+    await sendCodexSettingsMenu(chatId, 'Telegram model and reasoning overrides cleared.');
+    return;
+  }
+  if (data.startsWith('codex:model:')) {
+    await answerCallbackQuery(callbackQuery.id, 'Setting model');
+    await setCodexModel(chatId, data.slice('codex:model:'.length));
+    return;
+  }
+  if (data.startsWith('codex:reasoning:')) {
+    await answerCallbackQuery(callbackQuery.id, 'Setting reasoning');
+    await setCodexReasoning(chatId, data.slice('codex:reasoning:'.length));
     return;
   }
   await answerCallbackQuery(callbackQuery.id, 'Unknown action');
@@ -1310,10 +1607,39 @@ async function handle(chatId, text) {
       '/project new <name>',
       '/context show',
       '/session reset',
+      '/codex settings',
+      '/codex model',
+      '/codex model <slug|default>',
+      '/codex reasoning',
+      '/codex reasoning <effort|default>',
       '/codex login',
       '/codex login status',
       '/codex login cancel',
     ].join('\n'));
+    return;
+  }
+  if (trimmed === '/codex' || trimmed === '/codex settings') {
+    await sendCodexSettingsMenu(chatId);
+    return;
+  }
+  if (trimmed === '/codex model' || trimmed === '/codex models') {
+    await sendCodexModelMenu(chatId);
+    return;
+  }
+  if (trimmed.startsWith('/codex model ')) {
+    await setCodexModel(chatId, trimmed.slice('/codex model '.length));
+    return;
+  }
+  if (trimmed === '/codex reasoning' || trimmed === '/codex effort') {
+    await sendCodexReasoningMenu(chatId);
+    return;
+  }
+  if (trimmed.startsWith('/codex reasoning ')) {
+    await setCodexReasoning(chatId, trimmed.slice('/codex reasoning '.length));
+    return;
+  }
+  if (trimmed.startsWith('/codex effort ')) {
+    await setCodexReasoning(chatId, trimmed.slice('/codex effort '.length));
     return;
   }
   if (trimmed === '/codex login status') {
