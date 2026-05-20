@@ -47,6 +47,12 @@ This is useful when you are away from your main workstation, using a phone, or w
 
 Large tasks may take longer than a typical chat timeout. `codex-ops` can wait for real `codex exec` completion and send periodic progress updates while the task is still running.
 
+Because the Codex run stays in the background, Telegram remains responsive during the task:
+
+- `/codex task` shows the active task and current phase.
+- `/codex stop` cancels the active task and suppresses its final answer.
+- `/codex steer <instruction>` interrupts the active task and resumes the latest Codex session with the new operator instruction.
+
 This helps with work such as:
 
 - large refactors on a VPS project
@@ -58,6 +64,8 @@ This helps with work such as:
 - test-and-fix loops that need multiple commands
 
 Progress updates are explicitly marked as non-final, so the operator can distinguish them from the final report.
+
+Steering is useful when a long job is still valuable but the operator notices a better direction, a dangerous assumption, or a changed priority before the final answer arrives.
 
 ## Out-of-band incident response
 

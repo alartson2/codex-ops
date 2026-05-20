@@ -46,6 +46,17 @@ All runtime configuration is loaded from `/etc/codex-ops/bot.env`.
 - `CODEX_MODEL_CATALOG_TIMEOUT_MS` (default: `30000`): timeout for reading the current Codex model catalog with `codex debug models`.
 - `CODEX_PROGRESS_INTERVAL_MS` (default: `300000`): interval for "Codex progress update" Telegram messages while `codex exec` is still running. Set `0` to disable. Positive values below `60000` are raised to `60000`.
 - `CODEX_PROGRESS_MAX_CHARS` (default: `1800`): max length of streamed assistant progress copied into each progress update. Tool transcripts, patch output, and diffs are filtered out of progress updates.
+- `CODEX_STOP_KILL_GRACE_MS` (default: `10000`): grace period after `/codex stop` or `/codex steer` sends `SIGTERM`; after this, the bot sends `SIGKILL` if the managed process group is still alive.
+
+## Codex task control
+
+Long Codex runs execute in the background so the Telegram polling loop can still process control commands.
+
+- `/codex task`: show the currently active Codex task, phase, elapsed time, and request summary.
+- `/codex stop` or `/stop`: request emergency cancellation of the active task. The bot stops the child process and suppresses its final answer.
+- `/codex steer <instruction>` or `/steer <instruction>`: stop the current process, then resume the latest Codex session with the new operator instruction. Steering is accepted only after the current Codex session has started.
+
+Steering is implemented as interrupt plus `codex exec resume --last --all`. It is not live stdin injection into an already-running `codex exec` process.
 
 ## Codex model controls
 
@@ -118,4 +129,5 @@ CODEX_EXEC_TIMEOUT_MS=0
 CODEX_MODEL_CATALOG_TIMEOUT_MS=30000
 CODEX_PROGRESS_INTERVAL_MS=300000
 CODEX_PROGRESS_MAX_CHARS=1800
+CODEX_STOP_KILL_GRACE_MS=10000
 ```

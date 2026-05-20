@@ -52,6 +52,14 @@ Or from Telegram:
 - `/codex login status`
 - `/codex login cancel`
 
+## Running task control
+
+- `/codex task`: inspect the currently active Codex task.
+- `/codex stop` or `/stop`: emergency-stop the active task. The bot sends `SIGTERM` to the managed process group, waits `CODEX_STOP_KILL_GRACE_MS`, then sends `SIGKILL` if needed.
+- `/codex steer <instruction>` or `/steer <instruction>`: stop the active process and resume the latest Codex session with new guidance.
+
+Use steer when the task is still useful but needs a course correction. Use stop when the current task should not continue or should not send a final answer.
+
 ## Day-2 maintenance
 
 Update repository and service:

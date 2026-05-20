@@ -14,6 +14,7 @@ Host-level Telegram operations bot for Codex CLI, designed for OpenClaw, remote 
 - perform native Codex device login through Telegram (`/codex login`)
 - protect Telegram from flood output with message chunk limits and safe fallback behavior
 - receive periodic progress updates during long-running Codex tasks
+- stop or steer a running Codex task from Telegram
 
 ## Why this exists
 
@@ -42,6 +43,7 @@ The goal is not to replace SSH completely. The goal is to make the common loop f
 - OpenClaw-focused diagnostics and incident note generation
 - Telegram image input for Codex vision-capable investigations
 - Periodic progress updates for long-running Codex tasks
+- Emergency task control with `/codex stop` and `/codex steer <instruction>`
 - Telegram HTML rendering for Codex Markdown output
 - 429-aware Telegram send retry logic and anti-flood truncation
 
@@ -52,6 +54,7 @@ The goal is not to replace SSH completely. The goal is to make the common loop f
 - Production-adjacent test loops: change code, run commands, inspect service state, and verify behavior against real containers, ports, files, and systemd units.
 - Out-of-band incident response: keep a host-level assistant available even when the OpenClaw application layer or container runtime is degraded.
 - Long-running remote work: start larger Codex tasks from Telegram and receive periodic "Codex progress update" messages until the final answer arrives.
+- Operator steering: interrupt a long task when priorities change, then resume the latest Codex session with new guidance instead of waiting for an outdated final answer.
 - Shared operational memory: keep lightweight project context, runbooks, incident notes, and project changelogs on the server instead of scattering them across local machines.
 - Native Codex subscription auth on headless hosts: start device login from Telegram and complete browser confirmation elsewhere.
 - Safer Telegram output: convert Codex Markdown to Telegram-native formatting while limiting message chunks and avoiding raw stdout/stderr floods.
@@ -111,6 +114,9 @@ sudo systemctl status --no-pager codex-telegram-bot.service
 - `/project new <name>`
 - `/context show`
 - `/session reset`
+- `/codex task`
+- `/codex stop`
+- `/codex steer <instruction>`
 - `/codex settings`
 - `/codex model`
 - `/codex model <slug|default>`

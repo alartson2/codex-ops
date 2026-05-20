@@ -39,11 +39,13 @@ const CODEX_EXEC_TIMEOUT_MS = Math.max(0, Number(process.env.CODEX_EXEC_TIMEOUT_
 const CODEX_MODEL_CATALOG_TIMEOUT_MS = readOptionalNonNegativeMs('CODEX_MODEL_CATALOG_TIMEOUT_MS', 30000, { minPositive: 5000 });
 const CODEX_PROGRESS_INTERVAL_MS = readOptionalNonNegativeMs('CODEX_PROGRESS_INTERVAL_MS', 300000, { minPositive: 60000 });
 const CODEX_PROGRESS_MAX_CHARS = Math.max(500, Number(process.env.CODEX_PROGRESS_MAX_CHARS || '1800') || 1800);
+const CODEX_STOP_KILL_GRACE_MS = readOptionalNonNegativeMs('CODEX_STOP_KILL_GRACE_MS', 10000, { minPositive: 1000 });
 const TELEGRAM_IMAGE_MAX_BYTES = Math.max(1000000, Number(process.env.TELEGRAM_IMAGE_MAX_BYTES || '10000000') || 10000000);
 const PENDING_IMAGE_TTL_MS = readOptionalNonNegativeMs('PENDING_IMAGE_TTL_MS', 1800000, { minPositive: 60000 });
 const PENDING_IMAGE_MAX_ITEMS = Math.min(10, Math.max(1, Number(process.env.PENDING_IMAGE_MAX_ITEMS || '4') || 4));
 let offset = 0;
-let busy = false;
+let activeTask = null;
+let activeTaskSeq = 0;
 let authFlow = null;
 
 function readOptionalNonNegativeMs(name, defaultValue, opts = {}) {
@@ -87,6 +89,117 @@ function formatDurationMs(ms) {
   if (h > 0) return `${h}h ${m}m ${s}s`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
+}
+
+function normalizeTelegramText(text) {
+  return String(text || '').trim().replace(/^\/([A-Za-z0-9_]+)@[A-Za-z0-9_]+(?=\s|$)/, '/$1');
+}
+
+function isSameChat(left, right) {
+  return String(left) === String(right);
+}
+
+function activeTaskForChat(chatId) {
+  return activeTask && isSameChat(activeTask.chatId, chatId) ? activeTask : null;
+}
+
+function activeTaskAge(task) {
+  return task && task.startedAt ? formatDurationMs(Date.now() - task.startedAt) : 'unknown';
+}
+
+function activeTaskLabel(task) {
+  if (!task) return 'none';
+  const kind = task.kind === 'diag' ? 'diagnostic' : task.kind === 'steer' ? 'steer resume' : 'Codex request';
+  return `#${task.id} ${kind}`;
+}
+
+function renderActiveTask(task = activeTask) {
+  if (!task) return 'No active Codex task.';
+  const lines = [
+    `Active task: ${activeTaskLabel(task)}`,
+    `Project: ${task.project || '(unknown)'}`,
+    `Phase: ${task.phase || 'unknown'}`,
+    `Elapsed: ${activeTaskAge(task)}`,
+  ];
+  if (task.stopRequested) lines.push(`Stop requested: ${task.steerText ? 'yes, steer will resume' : 'yes'}`);
+  const requestText = task.steerSource || task.question;
+  if (requestText) lines.push(`Request: ${clip(requestText, 700)}`);
+  return lines.join('\n');
+}
+
+function createActiveTask({ chatId, kind = 'request', project = DEFAULT_PROJECT, question = '', images = [], resumeLast = false, previousTaskId = null }) {
+  const task = {
+    id: ++activeTaskSeq,
+    chatId,
+    kind,
+    project,
+    question: String(question || ''),
+    images: Array.isArray(images) ? images.map(normalizePendingImage).filter(Boolean) : [],
+    resumeLast: Boolean(resumeLast),
+    previousTaskId,
+    startedAt: Date.now(),
+    phase: 'starting',
+    codexSessionStarted: false,
+    child: null,
+    stopRequested: false,
+    stopReason: '',
+    steerText: '',
+    promise: null,
+  };
+  activeTask = task;
+  return task;
+}
+
+function setActiveTaskChild(task, child) {
+  if (!task || !child) return;
+  if (!activeTask || activeTask.id !== task.id) return;
+  task.child = child;
+}
+
+function clearActiveTaskChild(task, child) {
+  if (!task) return;
+  if (child && task.child !== child) return;
+  task.child = null;
+}
+
+function attachCodexChild(task, child) {
+  if (!task || !child) return;
+  task.codexSessionStarted = true;
+  setActiveTaskChild(task, child);
+  if (task.stopRequested) terminateTaskProcess(task);
+}
+
+function signalChildProcess(child, signal = 'SIGTERM') {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return false;
+  try {
+    if (child.__codexOpsKillProcessGroup && child.pid && process.platform !== 'win32') {
+      process.kill(-child.pid, signal);
+    } else {
+      child.kill(signal);
+    }
+    return true;
+  } catch {
+    try {
+      child.kill(signal);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function terminateTaskProcess(task, signal = 'SIGTERM') {
+  const child = task && task.child;
+  if (!signalChildProcess(child, signal)) return false;
+  if (CODEX_STOP_KILL_GRACE_MS > 0 && signal !== 'SIGKILL') {
+    const timer = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        signalChildProcess(child, 'SIGKILL');
+      }
+    }, CODEX_STOP_KILL_GRACE_MS);
+    if (typeof timer.unref === 'function') timer.unref();
+  }
+  return true;
 }
 
 function compactIncidentForPrompt(text, limit = HISTORICAL_INCIDENT_LIMIT) {
@@ -611,10 +724,22 @@ function run(command, args, opts = {}) {
       input,
       onStdout,
       onStderr,
+      onChild,
+      killProcessGroup,
       timeoutMs: _timeoutMs,
       ...spawnOpts
     } = opts;
-    const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], ...spawnOpts });
+    const spawnOptions = { stdio: ['pipe', 'pipe', 'pipe'], ...spawnOpts };
+    if (killProcessGroup && process.platform !== 'win32') spawnOptions.detached = true;
+    const child = spawn(command, args, spawnOptions);
+    child.__codexOpsKillProcessGroup = Boolean(killProcessGroup && process.platform !== 'win32');
+    if (typeof onChild === 'function') {
+      try {
+        onChild(child);
+      } catch (error) {
+        console.warn(`[run-on-child-error] ${error && (error.stack || error.message)}`);
+      }
+    }
     let stdout = '';
     let stderr = '';
     const timeoutMs = resolveRunTimeoutMs(opts);
@@ -623,7 +748,7 @@ function run(command, args, opts = {}) {
     if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
       timer = setTimeout(() => {
         timedOut = true;
-        child.kill('SIGTERM');
+        signalChildProcess(child, 'SIGTERM');
       }, timeoutMs);
     }
     if (input) child.stdin.end(input); else child.stdin.end();
@@ -648,8 +773,8 @@ function run(command, args, opts = {}) {
   });
 }
 
-async function sh(script, timeoutMs = 120000) {
-  return run('bash', ['-lc', script], { timeoutMs });
+async function sh(script, timeoutMs = 120000, opts = {}) {
+  return run('bash', ['-lc', script], { timeoutMs, ...opts });
 }
 
 async function loadCodexModelCatalog() {
@@ -1020,7 +1145,7 @@ async function collectStatus() {
   return sh(script, 120000);
 }
 
-async function collectOpenClawDiag() {
+async function collectOpenClawDiag(options = {}) {
   const script = [
     'set -euo pipefail',
     'echo "# Host"',
@@ -1044,7 +1169,7 @@ async function collectOpenClawDiag() {
     `ls -1t ${INCIDENTS_DIR} | head -n 10`,
     `for f in $(ls -1t ${INCIDENTS_DIR} | head -n 2); do echo "--- INCIDENT:$f ---"; sed -n '1,140p' ${INCIDENTS_DIR}/$f; done`,
   ].join('\n');
-  return sh(script, 300000);
+  return sh(script, 300000, { onChild: options.onChild, killProcessGroup: true });
 }
 
 async function runCodex(prompt, options = {}) {
@@ -1057,11 +1182,15 @@ async function runCodex(prompt, options = {}) {
   const selectedReasoning = normalizeCodexSettingValue(options.reasoningEffort || chatState && chatState.codexReasoningEffort);
   const modelArgs = selectedModel ? ['-m', selectedModel] : [];
   const reasoningArgs = selectedReasoning ? ['-c', `reasoning_effort=${quoteTomlString(selectedReasoning)}`] : [];
-  const args = ['HOME=/var/lib/codexops', `CODEX_HOME=${CODEX_HOME}`, 'codex', 'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--color', 'never', '-C', CODEX_CWD, '-o', outFile, ...modelArgs, ...reasoningArgs, ...imageArgs, '-'];
+  const args = options.resumeLast
+    ? ['HOME=/var/lib/codexops', `CODEX_HOME=${CODEX_HOME}`, 'codex', 'exec', 'resume', '--last', '--all', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '-o', outFile, ...modelArgs, ...reasoningArgs, ...imageArgs, '-']
+    : ['HOME=/var/lib/codexops', `CODEX_HOME=${CODEX_HOME}`, 'codex', 'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--color', 'never', '-C', CODEX_CWD, '-o', outFile, ...modelArgs, ...reasoningArgs, ...imageArgs, '-'];
   const progress = createCodexProgressReporter({ chatId: options.chatId });
   const result = await run('env', args, {
     input: prompt,
     timeoutMs: CODEX_EXEC_TIMEOUT_MS > 0 ? CODEX_EXEC_TIMEOUT_MS : null,
+    killProcessGroup: true,
+    onChild: options.onChild,
     onStderr: (chunk) => progress.pushStderr(chunk),
   });
   progress.stop();
@@ -1469,6 +1598,11 @@ async function handleCallback(callbackQuery) {
     return;
   }
   if (data.startsWith('project:switch:')) {
+    if (activeTaskForChat(chatId)) {
+      await answerCallbackQuery(callbackQuery.id, 'Task is still running');
+      await sendMessage(chatId, 'Wait for the active task to finish, or use /codex stop before switching projects.');
+      return;
+    }
     const active = await handleProjectSwitch(chatId, data.slice('project:switch:'.length));
     const projects = await listProjects();
     await editMessage(chatId, messageId, `Projects menu\nActive project: ${active}\n\nSession history was reset.`, { reply_markup: buildProjectsKeyboard(projects, active) });
@@ -1482,6 +1616,11 @@ async function handleCallback(callbackQuery) {
     return;
   }
   if (data === 'project:reset') {
+    if (activeTaskForChat(chatId)) {
+      await answerCallbackQuery(callbackQuery.id, 'Task is still running');
+      await sendMessage(chatId, 'Wait for the active task to finish, or use /codex stop before resetting the session.');
+      return;
+    }
     const state = await getChatState(chatId);
     await setChatState(chatId, { project: state.project, history: [] });
     const projects = await listProjects();
@@ -1523,24 +1662,258 @@ async function handleCallback(callbackQuery) {
   await answerCallbackQuery(callbackQuery.id, 'Unknown action');
 }
 
-async function runUserCodexRequest(chatId, question, extraImages = []) {
-  if (busy) {
-    await sendMessage(chatId, 'Another request is already in progress.');
+function buildSteerPrompt(steerText, previousTask) {
+  return [
+    'Operator steering update from Telegram.',
+    `Previous task: ${previousTask ? activeTaskLabel(previousTask) : '(unknown)'}.`,
+    'The previous run was interrupted so this instruction could be applied.',
+    'Continue the most recent Codex session. Preserve useful completed work, avoid unnecessary redo, and send the final answer only when the task is complete.',
+    '',
+    '<operator_steer>',
+    steerText,
+    '</operator_steer>',
+  ].join('\n');
+}
+
+async function sendBusyMessage(chatId) {
+  await sendMessage(chatId, [
+    'Another Codex task is already running.',
+    '',
+    renderActiveTask(),
+    '',
+    'Use /codex stop to cancel it, or /codex steer <instruction> to interrupt and resume with new guidance.',
+  ].join('\n'));
+}
+
+async function finishActiveTask(task) {
+  const steerText = task && task.steerText ? task.steerText : '';
+  if (activeTask && task && activeTask.id === task.id) activeTask = null;
+  if (steerText) startSteerCodexRequest(task.chatId, steerText, task);
+}
+
+async function handleTaskUnhandledError(task, error) {
+  console.error(`[bot-task-error] task=${task && task.id} error=${error && (error.stack || error.message)}`);
+  if (activeTask && task && activeTask.id === task.id) activeTask = null;
+  if (task && !task.stopRequested) {
+    try {
+      await sendMessage(task.chatId, `Request failed: ${error.message || String(error)}`);
+    } catch {}
+  }
+}
+
+async function maybeSendStopped(task) {
+  if (!task || !task.stopRequested || task.steerText) return;
+  await sendMessage(task.chatId, `Stopped ${activeTaskLabel(task)}.`);
+}
+
+async function finalizeActiveTask(task) {
+  try {
+    await maybeSendStopped(task);
+  } catch (error) {
+    console.warn(`[bot-task-stop-notice-failed] task=${task && task.id} error=${error && (error.stack || error.message)}`);
+  }
+  await finishActiveTask(task);
+}
+
+async function executeUserCodexRequest(task) {
+  try {
+    const imageLine = task.images.length ? `\nImages: ${task.images.length}` : '';
+    await sendMessage(task.chatId, `Working on it...\nProject: ${task.project}${imageLine}`);
+    if (task.stopRequested) return;
+    const prompt = await buildQuestionPrompt(task.question, { chatId: task.chatId, project: task.project, images: task.images });
+    if (task.stopRequested) return;
+    task.phase = 'running';
+    const answer = await runCodex(prompt, {
+      chatId: task.chatId,
+      images: task.images,
+      onChild: (child) => attachCodexChild(task, child),
+    });
+    clearActiveTaskChild(task);
+    if (task.stopRequested) return;
+    task.phase = 'finalizing';
+    const historyQuestion = [task.question, imageHistorySuffix(task.images)].filter(Boolean).join('\n');
+    await updateChatState(task.chatId, async (current) => appendExchange({ ...current, project: task.project, pendingImages: [] }, historyQuestion, answer));
+    await sendMessage(task.chatId, answer);
+  } catch (error) {
+    if (!task.stopRequested) {
+      console.error(`[bot-user-task-error] task=${task.id} error=${error && (error.stack || error.message)}`);
+      await sendMessage(task.chatId, `Request failed: ${error.message || String(error)}`);
+    }
+  } finally {
+    clearActiveTaskChild(task);
+    await finalizeActiveTask(task);
+  }
+}
+
+async function executeSteerCodexRequest(task) {
+  try {
+    await sendMessage(task.chatId, `Continuing the last Codex session with steer instruction...\nProject: ${task.project}`);
+    if (task.stopRequested) return;
+    task.phase = 'running';
+    const answer = await runCodex(task.question, {
+      chatId: task.chatId,
+      resumeLast: true,
+      onChild: (child) => attachCodexChild(task, child),
+    });
+    clearActiveTaskChild(task);
+    if (task.stopRequested) return;
+    task.phase = 'finalizing';
+    const historyQuestion = `Steer after task #${task.previousTaskId || '?'}:\n${task.steerSource || task.question}`;
+    await updateChatState(task.chatId, async (current) => appendExchange({ ...current, project: task.project }, historyQuestion, answer));
+    await sendMessage(task.chatId, answer);
+  } catch (error) {
+    if (!task.stopRequested) {
+      console.error(`[bot-steer-task-error] task=${task.id} error=${error && (error.stack || error.message)}`);
+      await sendMessage(task.chatId, `Steer resume failed: ${error.message || String(error)}`);
+    }
+  } finally {
+    clearActiveTaskChild(task);
+    await finalizeActiveTask(task);
+  }
+}
+
+function startSteerCodexRequest(chatId, steerText, previousTask) {
+  if (activeTask) {
+    void sendMessage(chatId, [
+      'Could not start steer resume because another task became active.',
+      '',
+      renderActiveTask(),
+    ].join('\n')).catch(() => {});
     return;
   }
-  busy = true;
-  try {
-    const state = await getChatState(chatId);
-    const images = [...state.pendingImages, ...extraImages.map(normalizePendingImage).filter(Boolean)].slice(-PENDING_IMAGE_MAX_ITEMS);
-    const imageLine = images.length ? `\nImages: ${images.length}` : '';
-    await sendMessage(chatId, `Working on it...\nProject: ${state.project}${imageLine}`);
-    const answer = await runCodex(await buildQuestionPrompt(question, { chatId, images }), { chatId, images });
-    const historyQuestion = [question, imageHistorySuffix(images)].filter(Boolean).join('\n');
-    await updateChatState(chatId, async (current) => appendExchange({ ...current, pendingImages: [] }, historyQuestion, answer));
-    await sendMessage(chatId, answer);
-  } finally {
-    busy = false;
+  const task = createActiveTask({
+    chatId,
+    kind: 'steer',
+    project: previousTask && previousTask.project || DEFAULT_PROJECT,
+    question: buildSteerPrompt(steerText, previousTask),
+    resumeLast: true,
+    previousTaskId: previousTask && previousTask.id,
+  });
+  task.steerSource = steerText;
+  task.promise = executeSteerCodexRequest(task).catch((error) => handleTaskUnhandledError(task, error));
+}
+
+async function runUserCodexRequest(chatId, question, extraImages = []) {
+  if (activeTask) {
+    await sendBusyMessage(chatId);
+    return;
   }
+  const state = await getChatState(chatId);
+  const images = [...state.pendingImages, ...extraImages.map(normalizePendingImage).filter(Boolean)].slice(-PENDING_IMAGE_MAX_ITEMS);
+  const task = createActiveTask({ chatId, kind: 'request', project: state.project, question, images });
+  task.promise = executeUserCodexRequest(task).catch((error) => handleTaskUnhandledError(task, error));
+}
+
+async function executeOpenClawDiagTask(task) {
+  try {
+    await sendMessage(task.chatId, 'Collecting OpenClaw diagnostics and sending context to Codex...');
+    if (task.stopRequested) return;
+    task.phase = 'collecting';
+    const collected = await collectOpenClawDiag({ onChild: (child) => setActiveTaskChild(task, child) });
+    clearActiveTaskChild(task);
+    if (task.stopRequested) return;
+    const context = [collected.stdout, collected.stderr].filter(Boolean).join('\n\n').trim();
+    const prompt = [
+      await buildQuestionPrompt('Diagnose current OpenClaw state on this server. Give: 1) current state 2) likely root cause 3) strongest evidence 4) what to check next 5) whether service is currently up. Do not propose changes unless the evidence strongly supports them.', { chatId: task.chatId, project: 'openclaw', disableHistory: true }),
+      '',
+      '<runtime_context>',
+      context,
+      '</runtime_context>',
+    ].join('\n');
+    if (task.stopRequested) return;
+    task.phase = 'running';
+    const answer = await runCodex(prompt, {
+      chatId: task.chatId,
+      onChild: (child) => attachCodexChild(task, child),
+    });
+    clearActiveTaskChild(task);
+    if (task.stopRequested) return;
+    task.phase = 'finalizing';
+    const file = path.join(INCIDENTS_DIR, `diag_openclaw_${nowStamp()}.md`);
+    const doc = ['# OpenClaw diagnostic run', '', `Time: ${new Date().toISOString()}`, '', '## Codex analysis', '', answer, '', '## Raw context', '', '```text', context.slice(0, 120000), '```', ''].join('\n');
+    await fs.writeFile(file, doc, 'utf8');
+    await sendMessage(task.chatId, answer);
+    await sendMessage(task.chatId, `Saved diagnostic note: ${path.basename(file)}`);
+  } catch (error) {
+    if (!task.stopRequested) {
+      console.error(`[bot-diag-task-error] task=${task.id} error=${error && (error.stack || error.message)}`);
+      await sendMessage(task.chatId, `Diagnostic run failed: ${error.message || String(error)}`);
+    }
+  } finally {
+    clearActiveTaskChild(task);
+    await finalizeActiveTask(task);
+  }
+}
+
+async function runOpenClawDiagRequest(chatId) {
+  if (activeTask) {
+    await sendBusyMessage(chatId);
+    return;
+  }
+  const task = createActiveTask({
+    chatId,
+    kind: 'diag',
+    project: 'openclaw',
+    question: 'Diagnose current OpenClaw state on this server.',
+  });
+  task.promise = executeOpenClawDiagTask(task).catch((error) => handleTaskUnhandledError(task, error));
+}
+
+async function stopActiveTask(chatId) {
+  const task = activeTask;
+  if (!task) {
+    await sendMessage(chatId, 'No active Codex task.');
+    return;
+  }
+  if (task.phase === 'finalizing') {
+    await sendMessage(chatId, `Codex has already finished ${activeTaskLabel(task)}. The final Telegram message is being delivered.`);
+    return;
+  }
+  if (task.stopRequested && !task.steerText) {
+    await sendMessage(chatId, `Stop is already requested for ${activeTaskLabel(task)}.`);
+    return;
+  }
+  task.stopRequested = true;
+  task.stopReason = 'operator-stop';
+  task.steerText = '';
+  const signaled = terminateTaskProcess(task);
+  await sendMessage(chatId, [
+    `Emergency stop requested for ${activeTaskLabel(task)}.`,
+    signaled ? 'Sent SIGTERM to the active Codex process.' : 'The Codex process is not running yet or already exited; the task will stop before sending a final answer.',
+  ].join('\n'));
+}
+
+async function steerActiveTask(chatId, steerText) {
+  const instruction = String(steerText || '').trim();
+  if (!instruction) {
+    await sendMessage(chatId, 'Usage: /codex steer <instruction>');
+    return;
+  }
+  const task = activeTask;
+  if (!task) {
+    await sendMessage(chatId, 'No active Codex task to steer. Start a request first, then use /codex steer <instruction> while it is running.');
+    return;
+  }
+  if (task.phase === 'finalizing') {
+    await sendMessage(chatId, `Codex has already finished ${activeTaskLabel(task)}. Send a new message if you want a follow-up.`);
+    return;
+  }
+  if (!task.codexSessionStarted) {
+    await sendMessage(chatId, [
+      `Cannot steer ${activeTaskLabel(task)} yet because Codex has not started its session.`,
+      'Use /codex stop to cancel it, or send /codex steer again after the task reaches the running phase.',
+    ].join('\n'));
+    return;
+  }
+  task.stopRequested = true;
+  task.stopReason = 'operator-steer';
+  task.steerText = instruction;
+  const signaled = terminateTaskProcess(task);
+  await sendMessage(chatId, [
+    `Steer instruction received for ${activeTaskLabel(task)}.`,
+    signaled ? 'Stopping the current Codex process now.' : 'The current process is not running yet or already exited.',
+    'Next step: I will resume the latest Codex session with your steering instruction.',
+  ].join('\n'));
 }
 
 async function handleImageMessage(chatId, msg, text, attachment) {
@@ -1556,8 +1929,12 @@ async function handleImageMessage(chatId, msg, text, attachment) {
     ].join('\n'));
     return;
   }
-  if (busy) {
-    await sendMessage(chatId, 'Another request is already in progress. Please send the image again when it finishes.');
+  if (activeTask) {
+    await sendMessage(chatId, [
+      'Another Codex task is already running. Please send the image again when it finishes.',
+      '',
+      renderActiveTask(),
+    ].join('\n'));
     return;
   }
 
@@ -1605,7 +1982,7 @@ async function handleMessage(msg) {
 }
 
 async function handle(chatId, text) {
-  const trimmed = (text || '').trim();
+  const trimmed = normalizeTelegramText(text);
   if (!trimmed) return;
   if (!ALLOWED_CHAT_IDS.has(String(chatId))) {
     await sendMessage(chatId, 'Access denied.');
@@ -1627,6 +2004,9 @@ async function handle(chatId, text) {
       '/project new <name>',
       '/context show',
       '/session reset',
+      '/codex task',
+      '/codex stop',
+      '/codex steer <instruction>',
       '/codex settings',
       '/codex model',
       '/codex model <slug|default>',
@@ -1640,6 +2020,26 @@ async function handle(chatId, text) {
   }
   if (trimmed === '/codex' || trimmed === '/codex settings') {
     await sendCodexSettingsMenu(chatId);
+    return;
+  }
+  if (trimmed === '/codex task' || trimmed === '/task') {
+    await sendMessage(chatId, renderActiveTask());
+    return;
+  }
+  if (trimmed === '/codex stop' || trimmed === '/codex cancel' || trimmed === '/stop' || trimmed === '/cancel') {
+    await stopActiveTask(chatId);
+    return;
+  }
+  if (trimmed === '/codex steer' || trimmed === '/steer') {
+    await sendMessage(chatId, 'Usage: /codex steer <instruction>');
+    return;
+  }
+  if (trimmed.startsWith('/codex steer ')) {
+    await steerActiveTask(chatId, trimmed.slice('/codex steer '.length));
+    return;
+  }
+  if (trimmed.startsWith('/steer ')) {
+    await steerActiveTask(chatId, trimmed.slice('/steer '.length));
     return;
   }
   if (trimmed === '/codex model' || trimmed === '/codex models') {
@@ -1685,6 +2085,10 @@ async function handle(chatId, text) {
     return;
   }
   if (trimmed === '/session reset') {
+    if (activeTaskForChat(chatId)) {
+      await sendMessage(chatId, 'Wait for the active task to finish, or use /codex stop before resetting the session.');
+      return;
+    }
     const state = await getChatState(chatId);
     await setChatState(chatId, { project: state.project, history: [] });
     await sendMessage(chatId, `Session history cleared. Active project remains ${state.project}.`);
@@ -1695,6 +2099,10 @@ async function handle(chatId, text) {
     const current = await getChatState(chatId);
     if (!arg || arg === '/project') {
       await sendMessage(chatId, `Current project: ${current.project}\nUsage: /project <name> or /project new <name>`);
+      return;
+    }
+    if (activeTaskForChat(chatId)) {
+      await sendMessage(chatId, 'Wait for the active task to finish, or use /codex stop before switching projects.');
       return;
     }
     if (arg.startsWith('new ')) {
@@ -1747,31 +2155,7 @@ async function handle(chatId, text) {
     return;
   }
   if (trimmed === '/diag openclaw') {
-    if (busy) {
-      await sendMessage(chatId, 'Another diagnostic run is already in progress.');
-      return;
-    }
-    busy = true;
-    try {
-      await sendMessage(chatId, 'Collecting OpenClaw diagnostics and sending context to Codex...');
-      const collected = await collectOpenClawDiag();
-      const context = [collected.stdout, collected.stderr].filter(Boolean).join('\n\n').trim();
-      const prompt = [
-        await buildQuestionPrompt('Diagnose current OpenClaw state on this server. Give: 1) current state 2) likely root cause 3) strongest evidence 4) what to check next 5) whether service is currently up. Do not propose changes unless the evidence strongly supports them.', { chatId, project: 'openclaw', disableHistory: true }),
-        '',
-        '<runtime_context>',
-        context,
-        '</runtime_context>',
-      ].join('\n');
-      const answer = await runCodex(prompt, { chatId });
-      const file = path.join(INCIDENTS_DIR, `diag_openclaw_${nowStamp()}.md`);
-      const doc = ['# OpenClaw diagnostic run', '', `Time: ${new Date().toISOString()}`, '', '## Codex analysis', '', answer, '', '## Raw context', '', '```text', context.slice(0, 120000), '```', ''].join('\n');
-      await fs.writeFile(file, doc, 'utf8');
-      await sendMessage(chatId, answer);
-      await sendMessage(chatId, `Saved diagnostic note: ${path.basename(file)}`);
-    } finally {
-      busy = false;
-    }
+    await runOpenClawDiagRequest(chatId);
     return;
   }
   if (trimmed.startsWith('/ask ')) {
