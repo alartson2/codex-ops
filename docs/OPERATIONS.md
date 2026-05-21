@@ -54,7 +54,8 @@ Or from Telegram:
 
 ## Running task control
 
-- `/codex task`: inspect the currently active Codex task.
+- `/codex task`: inspect the currently active Codex task and pending queue.
+- Regular requests sent while Codex is busy are queued; edit the original Telegram message before it starts to update the queued request.
 - `/codex stop` or `/stop`: emergency-stop the active task. The bot sends `SIGTERM` to the managed process group, waits `CODEX_STOP_KILL_GRACE_MS`, then sends `SIGKILL` if needed.
 - `/codex steer <instruction>` or `/steer <instruction>`: stop the active process and resume the latest Codex session with new guidance.
 

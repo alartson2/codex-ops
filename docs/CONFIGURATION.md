@@ -52,7 +52,9 @@ All runtime configuration is loaded from `/etc/codex-ops/bot.env`.
 
 Long Codex runs execute in the background so the Telegram polling loop can still process control commands.
 
-- `/codex task`: show the currently active Codex task, phase, elapsed time, and request summary.
+- Regular text requests sent while a Codex task is active are appended to an in-memory FIFO queue.
+- Editing a queued Telegram text message or image caption before it starts updates that queued request.
+- `/codex task`: show the currently active Codex task, phase, elapsed time, request summary, and pending queue.
 - `/codex stop` or `/stop`: request emergency cancellation of the active task. The bot stops the child process and suppresses its final answer.
 - `/codex steer <instruction>` or `/steer <instruction>`: stop the current process, then resume the latest Codex session with the new operator instruction. Steering is accepted only after the current Codex session has started.
 

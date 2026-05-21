@@ -102,8 +102,10 @@ sudo systemctl status --no-pager codex-telegram-bot.service
 ## Telegram commands
 
 - normal text message: ask Codex directly
+- normal text message while Codex is busy: queue the request
 - photo/image with caption: ask Codex about that image
 - photo/image without caption: save it for the next text question
+- editing a queued Telegram text/caption before it starts updates that queued request
 - `/ask <question>`
 - `/status`
 - `/diag openclaw`

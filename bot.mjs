@@ -46,7 +46,9 @@ const PENDING_IMAGE_MAX_ITEMS = Math.min(10, Math.max(1, Number(process.env.PEND
 let offset = 0;
 let activeTask = null;
 let activeTaskSeq = 0;
+const taskQueue = [];
 let authFlow = null;
+const TELEGRAM_ALLOWED_UPDATES = ['message', 'edited_message', 'callback_query'];
 
 function readOptionalNonNegativeMs(name, defaultValue, opts = {}) {
   const raw = process.env[name];
@@ -103,6 +105,18 @@ function activeTaskForChat(chatId) {
   return activeTask && isSameChat(activeTask.chatId, chatId) ? activeTask : null;
 }
 
+function queuedTasksForChat(chatId) {
+  return taskQueue.filter((task) => isSameChat(task.chatId, chatId));
+}
+
+function hasQueuedTasksForChat(chatId) {
+  return queuedTasksForChat(chatId).length > 0;
+}
+
+function hasActiveOrQueuedTaskForChat(chatId) {
+  return Boolean(activeTaskForChat(chatId) || hasQueuedTasksForChat(chatId));
+}
+
 function activeTaskAge(task) {
   return task && task.startedAt ? formatDurationMs(Date.now() - task.startedAt) : 'unknown';
 }
@@ -111,6 +125,29 @@ function activeTaskLabel(task) {
   if (!task) return 'none';
   const kind = task.kind === 'diag' ? 'diagnostic' : task.kind === 'steer' ? 'steer resume' : 'Codex request';
   return `#${task.id} ${kind}`;
+}
+
+function queuedTaskPosition(task) {
+  const index = taskQueue.findIndex((item) => item.id === task.id);
+  return index >= 0 ? index + 1 : 0;
+}
+
+function renderTaskQueue(chatId = null) {
+  const items = chatId == null ? taskQueue : queuedTasksForChat(chatId);
+  if (!items.length) return 'Queue: empty.';
+  const lines = [`Queue: ${items.length} pending`];
+  items.slice(0, 10).forEach((task, index) => {
+    const position = chatId == null ? queuedTaskPosition(task) : index + 1;
+    const imageLine = task.images && task.images.length ? `, images: ${task.images.length}` : '';
+    const updated = task.updatedAt ? ', edited' : '';
+    lines.push(`${position}. ${activeTaskLabel(task)} (${task.project || DEFAULT_PROJECT}${imageLine}${updated}): ${clip(task.question, 220)}`);
+  });
+  if (items.length > 10) lines.push(`...and ${items.length - 10} more`);
+  return lines.join('\n');
+}
+
+function renderTaskStatus(chatId = null) {
+  return [renderActiveTask(), renderTaskQueue(chatId)].join('\n\n');
 }
 
 function renderActiveTask(task = activeTask) {
@@ -127,9 +164,11 @@ function renderActiveTask(task = activeTask) {
   return lines.join('\n');
 }
 
-function createActiveTask({ chatId, kind = 'request', project = DEFAULT_PROJECT, question = '', images = [], resumeLast = false, previousTaskId = null }) {
+function createActiveTask({ id = null, chatId, kind = 'request', project = DEFAULT_PROJECT, question = '', images = [], resumeLast = false, previousTaskId = null, sourceMessageId = null, queuedAt = null }) {
+  const taskId = Number.isInteger(Number(id)) && Number(id) > 0 ? Number(id) : ++activeTaskSeq;
+  activeTaskSeq = Math.max(activeTaskSeq, taskId);
   const task = {
-    id: ++activeTaskSeq,
+    id: taskId,
     chatId,
     kind,
     project,
@@ -137,6 +176,8 @@ function createActiveTask({ chatId, kind = 'request', project = DEFAULT_PROJECT,
     images: Array.isArray(images) ? images.map(normalizePendingImage).filter(Boolean) : [],
     resumeLast: Boolean(resumeLast),
     previousTaskId,
+    sourceMessageId,
+    queuedAt,
     startedAt: Date.now(),
     phase: 'starting',
     codexSessionStarted: false,
@@ -148,6 +189,20 @@ function createActiveTask({ chatId, kind = 'request', project = DEFAULT_PROJECT,
   };
   activeTask = task;
   return task;
+}
+
+function createQueuedTask({ chatId, kind = 'request', project = DEFAULT_PROJECT, question = '', images = [], sourceMessageId = null }) {
+  return {
+    id: ++activeTaskSeq,
+    chatId,
+    kind,
+    project,
+    question: String(question || ''),
+    images: Array.isArray(images) ? images.map(normalizePendingImage).filter(Boolean) : [],
+    sourceMessageId,
+    queuedAt: Date.now(),
+    updatedAt: 0,
+  };
 }
 
 function setActiveTaskChild(task, child) {
@@ -1259,7 +1314,7 @@ async function initializeOffset() {
   }
   let nextOffset = 0;
   while (true) {
-    const updates = await tg('getUpdates', { timeout: 0, offset: nextOffset || undefined, limit: 100, allowed_updates: ['message', 'callback_query'] });
+    const updates = await tg('getUpdates', { timeout: 0, offset: nextOffset || undefined, limit: 100, allowed_updates: TELEGRAM_ALLOWED_UPDATES });
     if (!Array.isArray(updates) || updates.length === 0) break;
     nextOffset = updates[updates.length - 1].update_id + 1;
     if (updates.length < 100) break;
@@ -1598,9 +1653,9 @@ async function handleCallback(callbackQuery) {
     return;
   }
   if (data.startsWith('project:switch:')) {
-    if (activeTaskForChat(chatId)) {
-      await answerCallbackQuery(callbackQuery.id, 'Task is still running');
-      await sendMessage(chatId, 'Wait for the active task to finish, or use /codex stop before switching projects.');
+    if (hasActiveOrQueuedTaskForChat(chatId)) {
+      await answerCallbackQuery(callbackQuery.id, 'Task work is pending');
+      await sendMessage(chatId, 'Wait for the active and queued tasks to finish, or use /codex stop for the active task before switching projects.');
       return;
     }
     const active = await handleProjectSwitch(chatId, data.slice('project:switch:'.length));
@@ -1616,9 +1671,9 @@ async function handleCallback(callbackQuery) {
     return;
   }
   if (data === 'project:reset') {
-    if (activeTaskForChat(chatId)) {
-      await answerCallbackQuery(callbackQuery.id, 'Task is still running');
-      await sendMessage(chatId, 'Wait for the active task to finish, or use /codex stop before resetting the session.');
+    if (hasActiveOrQueuedTaskForChat(chatId)) {
+      await answerCallbackQuery(callbackQuery.id, 'Task work is pending');
+      await sendMessage(chatId, 'Wait for the active and queued tasks to finish, or use /codex stop for the active task before resetting the session.');
       return;
     }
     const state = await getChatState(chatId);
@@ -1675,20 +1730,14 @@ function buildSteerPrompt(steerText, previousTask) {
   ].join('\n');
 }
 
-async function sendBusyMessage(chatId) {
-  await sendMessage(chatId, [
-    'Another Codex task is already running.',
-    '',
-    renderActiveTask(),
-    '',
-    'Use /codex stop to cancel it, or /codex steer <instruction> to interrupt and resume with new guidance.',
-  ].join('\n'));
-}
-
 async function finishActiveTask(task) {
   const steerText = task && task.steerText ? task.steerText : '';
   if (activeTask && task && activeTask.id === task.id) activeTask = null;
-  if (steerText) startSteerCodexRequest(task.chatId, steerText, task);
+  if (steerText) {
+    startSteerCodexRequest(task.chatId, steerText, task);
+    return;
+  }
+  startNextQueuedTask();
 }
 
 async function handleTaskUnhandledError(task, error) {
@@ -1699,6 +1748,7 @@ async function handleTaskUnhandledError(task, error) {
       await sendMessage(task.chatId, `Request failed: ${error.message || String(error)}`);
     } catch {}
   }
+  startNextQueuedTask();
 }
 
 async function maybeSendStopped(task) {
@@ -1772,6 +1822,48 @@ async function executeSteerCodexRequest(task) {
   }
 }
 
+function startCodexTask(task) {
+  if (!task) return;
+  if (task.kind === 'diag') {
+    task.promise = executeOpenClawDiagTask(task).catch((error) => handleTaskUnhandledError(task, error));
+    return;
+  }
+  if (task.kind === 'steer') {
+    task.promise = executeSteerCodexRequest(task).catch((error) => handleTaskUnhandledError(task, error));
+    return;
+  }
+  task.promise = executeUserCodexRequest(task).catch((error) => handleTaskUnhandledError(task, error));
+}
+
+function startNextQueuedTask() {
+  if (activeTask || !taskQueue.length) return false;
+  const queued = taskQueue.shift();
+  const task = createActiveTask({
+    id: queued.id,
+    chatId: queued.chatId,
+    kind: queued.kind,
+    project: queued.project,
+    question: queued.question,
+    images: queued.images,
+    sourceMessageId: queued.sourceMessageId,
+    queuedAt: queued.queuedAt,
+  });
+  startCodexTask(task);
+  return true;
+}
+
+async function sendQueuedTaskMessage(chatId, task) {
+  const position = queuedTaskPosition(task);
+  const imageLine = task.images && task.images.length ? `\nImages: ${task.images.length}` : '';
+  await sendMessage(chatId, [
+    `Queued ${activeTaskLabel(task)} at position ${position}.`,
+    `Project: ${task.project}${imageLine}`,
+    `Request: ${clip(task.question, 700)}`,
+    '',
+    'Edit the original Telegram message before it starts to update this queued request.',
+  ].join('\n'));
+}
+
 function startSteerCodexRequest(chatId, steerText, previousTask) {
   if (activeTask) {
     void sendMessage(chatId, [
@@ -1790,18 +1882,24 @@ function startSteerCodexRequest(chatId, steerText, previousTask) {
     previousTaskId: previousTask && previousTask.id,
   });
   task.steerSource = steerText;
-  task.promise = executeSteerCodexRequest(task).catch((error) => handleTaskUnhandledError(task, error));
+  startCodexTask(task);
 }
 
-async function runUserCodexRequest(chatId, question, extraImages = []) {
-  if (activeTask) {
-    await sendBusyMessage(chatId);
-    return;
-  }
+async function runUserCodexRequest(chatId, question, extraImages = [], source = {}) {
   const state = await getChatState(chatId);
   const images = [...state.pendingImages, ...extraImages.map(normalizePendingImage).filter(Boolean)].slice(-PENDING_IMAGE_MAX_ITEMS);
-  const task = createActiveTask({ chatId, kind: 'request', project: state.project, question, images });
-  task.promise = executeUserCodexRequest(task).catch((error) => handleTaskUnhandledError(task, error));
+  if (state.pendingImages.length) {
+    await updateChatState(chatId, async (current) => ({ ...current, pendingImages: [] }));
+  }
+  if (activeTask || taskQueue.length) {
+    const queued = createQueuedTask({ chatId, kind: 'request', project: state.project, question, images, sourceMessageId: source.messageId || null });
+    taskQueue.push(queued);
+    await sendQueuedTaskMessage(chatId, queued);
+    if (!activeTask) startNextQueuedTask();
+    return;
+  }
+  const task = createActiveTask({ chatId, kind: 'request', project: state.project, question, images, sourceMessageId: source.messageId || null });
+  startCodexTask(task);
 }
 
 async function executeOpenClawDiagTask(task) {
@@ -1845,9 +1943,18 @@ async function executeOpenClawDiagTask(task) {
   }
 }
 
-async function runOpenClawDiagRequest(chatId) {
-  if (activeTask) {
-    await sendBusyMessage(chatId);
+async function runOpenClawDiagRequest(chatId, source = {}) {
+  if (activeTask || taskQueue.length) {
+    const queued = createQueuedTask({
+      chatId,
+      kind: 'diag',
+      project: 'openclaw',
+      question: 'Diagnose current OpenClaw state on this server.',
+      sourceMessageId: source.messageId || null,
+    });
+    taskQueue.push(queued);
+    await sendQueuedTaskMessage(chatId, queued);
+    if (!activeTask) startNextQueuedTask();
     return;
   }
   const task = createActiveTask({
@@ -1855,8 +1962,9 @@ async function runOpenClawDiagRequest(chatId) {
     kind: 'diag',
     project: 'openclaw',
     question: 'Diagnose current OpenClaw state on this server.',
+    sourceMessageId: source.messageId || null,
   });
-  task.promise = executeOpenClawDiagTask(task).catch((error) => handleTaskUnhandledError(task, error));
+  startCodexTask(task);
 }
 
 async function stopActiveTask(chatId) {
@@ -1929,15 +2037,6 @@ async function handleImageMessage(chatId, msg, text, attachment) {
     ].join('\n'));
     return;
   }
-  if (activeTask) {
-    await sendMessage(chatId, [
-      'Another Codex task is already running. Please send the image again when it finishes.',
-      '',
-      renderActiveTask(),
-    ].join('\n'));
-    return;
-  }
-
   let image = null;
   try {
     image = await downloadTelegramImage(attachment, msg);
@@ -1959,7 +2058,7 @@ async function handleImageMessage(chatId, msg, text, attachment) {
     return;
   }
 
-  await runUserCodexRequest(chatId, question, [image]);
+  await runUserCodexRequest(chatId, question, [image], { messageId: msg.message_id });
 }
 
 async function handleMessage(msg) {
@@ -1978,10 +2077,48 @@ async function handleMessage(msg) {
     await sendMessage(chatId, 'This file type is not supported yet. Send a Telegram photo or an image document.');
     return;
   }
-  await handle(chatId, msg.text || '');
+  await handle(chatId, msg.text || '', { messageId: msg.message_id });
 }
 
-async function handle(chatId, text) {
+function questionTextFromTelegramText(text) {
+  const trimmed = normalizeTelegramText(text);
+  if (!trimmed) return '';
+  if (trimmed === '/ask') return '';
+  if (trimmed.startsWith('/ask ')) return trimmed.slice('/ask '.length).trim();
+  if (trimmed.startsWith('/')) return null;
+  return trimmed;
+}
+
+async function handleEditedMessage(msg) {
+  const chatId = msg && msg.chat && msg.chat.id;
+  if (!chatId) return;
+  if (!ALLOWED_CHAT_IDS.has(String(chatId))) {
+    await sendMessage(chatId, 'Access denied.');
+    return;
+  }
+  const messageId = msg.message_id;
+  const queued = taskQueue.find((task) => isSameChat(task.chatId, chatId) && String(task.sourceMessageId || '') === String(messageId || ''));
+  if (!queued) return;
+  if (queued.kind !== 'request') {
+    await sendMessage(chatId, `Queued ${activeTaskLabel(queued)} cannot be edited this way.`);
+    return;
+  }
+  const text = msg.caption != null ? msg.caption : msg.text || '';
+  const question = questionTextFromTelegramText(text);
+  if (!question) {
+    const reason = question === null ? 'edited text is a command' : 'edited text is empty';
+    await sendMessage(chatId, `Queued ${activeTaskLabel(queued)} was not updated because ${reason}.`);
+    return;
+  }
+  queued.question = question;
+  queued.updatedAt = Date.now();
+  await sendMessage(chatId, [
+    `Updated queued ${activeTaskLabel(queued)} at position ${queuedTaskPosition(queued)}.`,
+    `Request: ${clip(queued.question, 700)}`,
+  ].join('\n'));
+}
+
+async function handle(chatId, text, source = {}) {
   const trimmed = normalizeTelegramText(text);
   if (!trimmed) return;
   if (!ALLOWED_CHAT_IDS.has(String(chatId))) {
@@ -1992,7 +2129,9 @@ async function handle(chatId, text) {
     await sendMessage(chatId, [
       `codex-ops on ${HOST_LABEL}`,
       'Regular text messages are treated as direct questions to Codex.',
+      'If Codex is already working, regular requests are queued automatically.',
       'Telegram photos and image documents can be sent with a caption, or saved for the next text question.',
+      'Edit a queued Telegram request before it starts to update the queued text.',
       'Commands:',
       '/ask <question>',
       '/status',
@@ -2023,7 +2162,7 @@ async function handle(chatId, text) {
     return;
   }
   if (trimmed === '/codex task' || trimmed === '/task') {
-    await sendMessage(chatId, renderActiveTask());
+    await sendMessage(chatId, renderTaskStatus(chatId));
     return;
   }
   if (trimmed === '/codex stop' || trimmed === '/codex cancel' || trimmed === '/stop' || trimmed === '/cancel') {
@@ -2085,8 +2224,8 @@ async function handle(chatId, text) {
     return;
   }
   if (trimmed === '/session reset') {
-    if (activeTaskForChat(chatId)) {
-      await sendMessage(chatId, 'Wait for the active task to finish, or use /codex stop before resetting the session.');
+    if (hasActiveOrQueuedTaskForChat(chatId)) {
+      await sendMessage(chatId, 'Wait for the active and queued tasks to finish, or use /codex stop for the active task before resetting the session.');
       return;
     }
     const state = await getChatState(chatId);
@@ -2101,8 +2240,8 @@ async function handle(chatId, text) {
       await sendMessage(chatId, `Current project: ${current.project}\nUsage: /project <name> or /project new <name>`);
       return;
     }
-    if (activeTaskForChat(chatId)) {
-      await sendMessage(chatId, 'Wait for the active task to finish, or use /codex stop before switching projects.');
+    if (hasActiveOrQueuedTaskForChat(chatId)) {
+      await sendMessage(chatId, 'Wait for the active and queued tasks to finish, or use /codex stop for the active task before switching projects.');
       return;
     }
     if (arg.startsWith('new ')) {
@@ -2155,7 +2294,7 @@ async function handle(chatId, text) {
     return;
   }
   if (trimmed === '/diag openclaw') {
-    await runOpenClawDiagRequest(chatId);
+    await runOpenClawDiagRequest(chatId, source);
     return;
   }
   if (trimmed.startsWith('/ask ')) {
@@ -2164,20 +2303,20 @@ async function handle(chatId, text) {
       await sendMessage(chatId, 'Usage: /ask <question>');
       return;
     }
-    await runUserCodexRequest(chatId, question);
+    await runUserCodexRequest(chatId, question, [], source);
     return;
   }
   if (trimmed.startsWith('/')) {
     await sendMessage(chatId, 'Unknown command. Use /help');
     return;
   }
-  await runUserCodexRequest(chatId, trimmed);
+  await runUserCodexRequest(chatId, trimmed, [], source);
 }
 
 async function poll() {
   while (true) {
     try {
-      const updates = await tg('getUpdates', { timeout: 50, offset, allowed_updates: ['message', 'callback_query'] });
+      const updates = await tg('getUpdates', { timeout: 50, offset, allowed_updates: TELEGRAM_ALLOWED_UPDATES });
       for (const update of updates) {
         offset = update.update_id + 1;
         await saveOffsetState(offset);
@@ -2196,6 +2335,19 @@ async function poll() {
                 await sendMessage(chatId, `Request failed: ${error.message}`);
               } catch {}
             }
+          }
+          continue;
+        }
+        if (update.edited_message) {
+          const edited = update.edited_message;
+          try {
+            await handleEditedMessage(edited);
+          } catch (error) {
+            const incomingText = edited.text || edited.caption || '';
+            console.error(`[bot-edit-error] chat=${edited.chat && edited.chat.id} text=${JSON.stringify(incomingText.slice(0, 300))} error=${error && (error.stack || error.message)}`);
+            try {
+              await sendMessage(edited.chat.id, `Request failed: ${error.message}`);
+            } catch {}
           }
           continue;
         }

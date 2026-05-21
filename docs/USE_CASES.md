@@ -49,7 +49,8 @@ Large tasks may take longer than a typical chat timeout. `codex-ops` can wait fo
 
 Because the Codex run stays in the background, Telegram remains responsive during the task:
 
-- `/codex task` shows the active task and current phase.
+- `/codex task` shows the active task, current phase, and pending queue.
+- Regular requests sent while Codex is busy are queued; edit the original Telegram message before it starts to update the queued request.
 - `/codex stop` cancels the active task and suppresses its final answer.
 - `/codex steer <instruction>` interrupts the active task and resumes the latest Codex session with the new operator instruction.
 
