@@ -5,7 +5,7 @@ All runtime configuration is loaded from `/etc/codex-ops/bot.env`.
 ## Required variables
 
 - `TELEGRAM_BOT_TOKEN`: Telegram bot token from BotFather.
-- `ALLOWED_CHAT_IDS`: comma-separated list of Telegram chat IDs allowed to use the bot.
+- `ALLOWED_CHAT_IDS`: comma-separated list of Telegram chat IDs allowed to use the bot. Multiple IDs enable multi-chat mode for trusted operators.
 
 ## Core paths and identity
 
@@ -22,6 +22,16 @@ All runtime configuration is loaded from `/etc/codex-ops/bot.env`.
 - `HISTORY_ITEMS` (default: `8`): number of recent user/assistant items kept per chat.
 - `HISTORY_ITEM_CHARS` (default: `1400`): max chars per history item.
 - `HISTORICAL_INCIDENT_LIMIT` (default: `4000`): max chars of latest incident fed into prompt.
+
+## Multi-chat behavior
+
+One bot instance can be attached to multiple allowed Telegram chats by setting `ALLOWED_CHAT_IDS=123,456,...`.
+
+Per-chat state is stored under each Telegram `chat.id` in `CHAT_STATE_FILE`. This includes the active project, recent history, pending images, and Codex model/reasoning overrides. In Telegram groups, everyone in the same group shares the same group chat session because Telegram exposes the group `chat.id` to the bot.
+
+Project files are shared across chats when the same project is selected. That includes the project repository and memory files under `PROJECTS_DIR`. The Codex worker is also shared: the process runs one active Codex task at a time and queues new requests FIFO.
+
+For separate trust boundaries, run separate bot instances with different `TELEGRAM_BOT_TOKEN`, `ALLOWED_CHAT_IDS`, `STATE_DIR`, `PROJECTS_DIR`, and `CODEX_HOME`. A separate service user is recommended when filesystem permissions, credentials, or Codex login state should not be shared.
 
 ## Telegram image input tuning
 

@@ -12,6 +12,7 @@ Host-level Telegram operations bot for Codex CLI, designed for OpenClaw, remote 
 - send Telegram photos or image documents to Codex as visual context
 - send Telegram voice messages for OpenRouter transcription and pre-run plan review
 - keep short per-chat context with project switching
+- share one bot across multiple allowed Telegram chats, with separate lightweight chat sessions
 - perform native Codex device login through Telegram (`/codex login`)
 - protect Telegram from flood output with message chunk limits and safe fallback behavior
 - receive periodic progress updates during long-running Codex tasks
@@ -36,6 +37,7 @@ The goal is not to replace SSH completely. The goal is to make the common loop f
 ## Main features
 
 - Telegram bot frontend with access control (`ALLOWED_CHAT_IDS`)
+- Multi-chat mode for trusted operators, with per-chat session history, active project, pending images, and model settings
 - Codex CLI integration (`codex exec`) for investigations and Q/A
 - Telegram controls for Codex model and reasoning effort
 - Native subscription device auth flow (`/codex login`)
@@ -61,6 +63,7 @@ The goal is not to replace SSH completely. The goal is to make the common loop f
 - Out-of-band incident response: keep a host-level assistant available even when the OpenClaw application layer or container runtime is degraded.
 - Long-running remote work: start larger Codex tasks from Telegram and receive periodic "Codex progress update" messages until the final answer arrives.
 - Operator steering: interrupt a long task when priorities change, then resume the latest Codex session with new guidance instead of waiting for an outdated final answer.
+- Multi-operator access: attach several trusted Telegram chats to the same host bot while keeping their lightweight chat sessions separate.
 - Shared operational memory: keep lightweight project context, runbooks, incident notes, and project changelogs on the server instead of scattering them across local machines.
 - Native Codex subscription auth on headless hosts: start device login from Telegram and complete browser confirmation elsewhere.
 - Safer Telegram output: convert Codex Markdown to Telegram-native formatting while limiting message chunks and avoiding raw stdout/stderr floods.
@@ -134,6 +137,28 @@ sudo systemctl status --no-pager codex-telegram-bot.service
 - `/codex login`
 - `/codex login status`
 - `/codex login cancel`
+
+## Multi-user mode
+
+`codex-ops` can serve several trusted Telegram chats from one bot instance by listing multiple chat IDs in `ALLOWED_CHAT_IDS`.
+
+What is isolated per Telegram chat:
+
+- active project selection
+- recent lightweight chat history
+- pending image attachments
+- Codex model and reasoning overrides
+
+What is shared by the bot instance:
+
+- project repositories under `/srv/codex-ops/projects/<project>/repo`
+- project memory files (`CONTEXT.md`, `RUNBOOK.md`, `CHANGELOG.md`, `NOTES.md`)
+- the single active Codex worker and FIFO task queue
+- Codex authentication, host permissions, environment, and service account
+
+When another allowed chat has the active Codex task, `/codex task` only reports that another chat is busy and shows this chat's own queue. It does not show the other chat's request text.
+
+Use one shared instance for trusted operators working on the same host and project memory. Use separate bot instances, state directories, project directories, Codex homes, and preferably separate service users when operators should not share repository state, credentials, task queue, or long-term memory.
 
 ## Documentation
 

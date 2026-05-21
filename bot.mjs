@@ -161,7 +161,7 @@ function renderTaskQueue(chatId = null) {
 }
 
 function renderTaskStatus(chatId = null) {
-  return [renderActiveTask(), renderTaskQueue(chatId)].join('\n\n');
+  return [renderActiveTaskForChat(chatId), renderTaskQueue(chatId)].join('\n\n');
 }
 
 function renderActiveTask(task = activeTask) {
@@ -176,6 +176,15 @@ function renderActiveTask(task = activeTask) {
   const requestText = task.steerSource || task.question;
   if (requestText) lines.push(`Request: ${clip(requestText, 700)}`);
   return lines.join('\n');
+}
+
+function renderActiveTaskForChat(chatId = null) {
+  if (!activeTask) return renderActiveTask(null);
+  if (chatId == null || isSameChat(activeTask.chatId, chatId)) return renderActiveTask(activeTask);
+  return [
+    'Another allowed chat currently has an active Codex task.',
+    'Your chat has no active task; new requests will be queued until the active task finishes.',
+  ].join('\n');
 }
 
 function createActiveTask({ id = null, chatId, kind = 'request', project = DEFAULT_PROJECT, question = '', images = [], resumeLast = false, previousTaskId = null, sourceMessageId = null, queuedAt = null }) {
@@ -2476,7 +2485,7 @@ function startSteerCodexRequest(chatId, steerText, previousTask) {
     void sendMessage(chatId, [
       'Could not start steer resume because another task became active.',
       '',
-      renderActiveTask(),
+      renderActiveTaskForChat(chatId),
     ].join('\n')).catch(() => {});
     return;
   }

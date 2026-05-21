@@ -91,6 +91,12 @@ This gives remote work a memory layer without requiring every detail to live in 
 
 Project `CHANGELOG.md` files are useful for chronological state: what changed, what was deployed, and what is planned but not done yet. Project `NOTES.md` files are useful for durable project facts, pitfalls, decisions, and pending work. Together, they let Codex continue from server-side operational memory instead of relying only on recent chat context.
 
+## Multi-operator access
+
+A single bot instance can serve multiple trusted Telegram chats. Each chat keeps its own active project, recent history, pending images, and Codex model settings, so operators can have separate lightweight sessions even when they use the same bot.
+
+The server-side project memory remains shared when operators select the same project. This is useful for one team working on one host, because project notes, changelogs, and repository snapshots accumulate in one place. It is not a tenant isolation boundary: separate users with separate trust requirements should use separate bot instances, state directories, project directories, Codex homes, and service users.
+
 ## Headless native Codex auth
 
 Many VPS setups do not have a browser. `codex-ops` supports a Telegram-triggered Codex device login flow:
