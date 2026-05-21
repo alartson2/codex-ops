@@ -1583,6 +1583,66 @@ function formatRepositoryWarnings(repository) {
   return warnings.length ? warnings.join('\n') : '';
 }
 
+async function gitStatusPorcelain(dir) {
+  const result = await run('git', ['-C', dir, 'status', '--porcelain=v1'], { timeoutMs: 30000 });
+  if (result.code !== 0) {
+    const details = (result.stderr || result.stdout || 'git status failed').trim();
+    throw new Error(`Could not inspect project repository at ${dir}: ${details}`);
+  }
+  return String(result.stdout || '').trim();
+}
+
+async function autoCommitProjectRepository(project, question = '') {
+  const safe = normalizeProjectName(project);
+  if (!safe) return { committed: false, reason: 'invalid project' };
+  const paths = await ensureProjectFiles(safe);
+  const before = await gitStatusPorcelain(paths.repo);
+  if (!before) return { committed: false, reason: 'repository clean', path: paths.repo };
+
+  const addResult = await run('git', ['-C', paths.repo, 'add', '-A'], { timeoutMs: 60000 });
+  if (addResult.code !== 0) {
+    const details = (addResult.stderr || addResult.stdout || 'git add failed').trim();
+    throw new Error(`Could not stage project repository changes at ${paths.repo}: ${details}`);
+  }
+
+  const staged = await run('git', ['-C', paths.repo, 'diff', '--cached', '--quiet'], { timeoutMs: 30000 });
+  if (staged.code === 0) return { committed: false, reason: 'no staged changes', path: paths.repo };
+  if (staged.code !== 1) {
+    const details = (staged.stderr || staged.stdout || 'git diff --cached failed').trim();
+    throw new Error(`Could not inspect staged project changes at ${paths.repo}: ${details}`);
+  }
+
+  const message = `Codex report snapshot for ${safe}`;
+  const body = clip(question, 1200);
+  const args = ['-C', paths.repo, 'commit', '-m', message];
+  if (body) args.push('-m', body);
+  const env = {
+    ...process.env,
+    GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME || 'codex-ops bot',
+    GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL || 'codex-ops@localhost',
+    GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME || 'codex-ops bot',
+    GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL || 'codex-ops@localhost',
+  };
+  const commitResult = await run('git', args, { timeoutMs: 60000, env });
+  if (commitResult.code !== 0) {
+    const details = (commitResult.stderr || commitResult.stdout || 'git commit failed').trim();
+    throw new Error(`Could not auto-commit project repository at ${paths.repo}: ${details}`);
+  }
+
+  const rev = await run('git', ['-C', paths.repo, 'rev-parse', '--short', 'HEAD'], { timeoutMs: 30000 });
+  return {
+    committed: true,
+    hash: rev.code === 0 ? String(rev.stdout || '').trim() : '',
+    path: paths.repo,
+    warnings: paths.repository.warnings,
+  };
+}
+
+function formatAutoCommitNote(result) {
+  if (!result || !result.committed) return '';
+  return `Auto-commit before report: ${result.hash || 'created'} in ${result.path}`;
+}
+
 function defaultProjectChangelog(project) {
   return `# ${project} Changelog
 
@@ -2311,9 +2371,17 @@ async function executeUserCodexRequest(task) {
     clearActiveTaskChild(task);
     if (task.stopRequested) return;
     task.phase = 'finalizing';
+    let autoCommitNote = '';
+    try {
+      autoCommitNote = formatAutoCommitNote(await autoCommitProjectRepository(task.project, task.question));
+    } catch (error) {
+      console.error(`[bot-auto-commit-error] task=${task.id} error=${error && (error.stack || error.message)}`);
+      autoCommitNote = `Warning: auto-commit before report failed: ${error.message || String(error)}`;
+    }
+    const finalAnswer = [answer, autoCommitNote].filter(Boolean).join('\n\n');
     const historyQuestion = [task.question, imageHistorySuffix(task.images)].filter(Boolean).join('\n');
-    await updateChatState(task.chatId, async (current) => appendExchange({ ...current, project: task.project, pendingImages: [] }, historyQuestion, answer));
-    await sendMessage(task.chatId, answer);
+    await updateChatState(task.chatId, async (current) => appendExchange({ ...current, project: task.project, pendingImages: [] }, historyQuestion, finalAnswer));
+    await sendMessage(task.chatId, finalAnswer);
   } catch (error) {
     if (!task.stopRequested) {
       console.error(`[bot-user-task-error] task=${task.id} error=${error && (error.stack || error.message)}`);
@@ -2339,9 +2407,17 @@ async function executeSteerCodexRequest(task) {
     clearActiveTaskChild(task);
     if (task.stopRequested) return;
     task.phase = 'finalizing';
+    let autoCommitNote = '';
+    try {
+      autoCommitNote = formatAutoCommitNote(await autoCommitProjectRepository(task.project, task.steerSource || task.question));
+    } catch (error) {
+      console.error(`[bot-auto-commit-error] task=${task.id} error=${error && (error.stack || error.message)}`);
+      autoCommitNote = `Warning: auto-commit before report failed: ${error.message || String(error)}`;
+    }
+    const finalAnswer = [answer, autoCommitNote].filter(Boolean).join('\n\n');
     const historyQuestion = `Steer after task #${task.previousTaskId || '?'}:\n${task.steerSource || task.question}`;
-    await updateChatState(task.chatId, async (current) => appendExchange({ ...current, project: task.project }, historyQuestion, answer));
-    await sendMessage(task.chatId, answer);
+    await updateChatState(task.chatId, async (current) => appendExchange({ ...current, project: task.project }, historyQuestion, finalAnswer));
+    await sendMessage(task.chatId, finalAnswer);
   } catch (error) {
     if (!task.stopRequested) {
       console.error(`[bot-steer-task-error] task=${task.id} error=${error && (error.stack || error.message)}`);

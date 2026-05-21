@@ -16,6 +16,8 @@ The default projects are `openclaw` and `server`. New projects created with `/pr
 
 If an older project directory does not have `repo` yet, the bot creates it automatically the next time that project is ensured, switched to, shown in context, or used for a Codex request. Repositories start without a git remote; until a remote is configured, Codex can commit locally but has nowhere to push.
 
+Before sending a final Telegram report for a regular Codex request or steer resume, the bot checks the active project repository. If files changed, it stages all repository changes and creates a local snapshot commit. The report includes the commit hash when a snapshot was created. This is local-only unless the project repository has a remote and someone pushes it.
+
 The host-level files `/srv/codex-ops/OPS_CONTEXT.md` and `/srv/codex-ops/RUNBOOK_OPENCLAW.md` are still used for broad operational context, but project history belongs in project memory.
 
 ## How Codex sees the memory
