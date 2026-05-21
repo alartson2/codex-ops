@@ -44,7 +44,7 @@ Recommended base values:
 - `STATE_DIR=/var/lib/codexops/state`
 - `UPLOADS_DIR=/var/lib/codexops/state/uploads`
 - `OPENCLAW_CONTAINER=openclaw-yvrh-openclaw-1`
-- `CODEX_CWD=/srv/codex-ops/incidents` as the fallback workspace. Project requests normally run from `/srv/codex-ops/projects/<project>/repo`.
+- `CODEX_CWD=/srv/codex-ops/incidents` as the fallback workspace. Project requests normally run from `/srv/codex-ops/projects/<project>`.
 
 ## Native Codex login (subscription device auth)
 

@@ -1429,7 +1429,8 @@ function projectPaths(project) {
   const dir = path.join(PROJECTS_DIR, safe);
   return {
     dir,
-    repo: path.join(dir, 'repo'),
+    repo: dir,
+    legacyRepo: path.join(dir, 'repo'),
     context: path.join(dir, 'CONTEXT.md'),
     runbook: path.join(dir, 'RUNBOOK.md'),
     changelog: path.join(dir, 'CHANGELOG.md'),
@@ -1588,9 +1589,39 @@ async function gitRemoteNames(dir) {
   return String(result.stdout || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }
 
+async function cleanupLegacyProjectRepository(paths, warnings) {
+  if (!paths || !paths.legacyRepo || paths.legacyRepo === paths.repo) return;
+  let stat = null;
+  try {
+    stat = await fs.stat(paths.legacyRepo);
+  } catch {
+    return;
+  }
+  if (!stat.isDirectory()) {
+    warnings.push(`Warning: legacy project repo path exists but is not a directory: ${paths.legacyRepo}`);
+    return;
+  }
+
+  const nestedGitDir = path.join(paths.legacyRepo, '.git');
+  if (!(await fileExists(nestedGitDir))) {
+    warnings.push(`Warning: legacy project repo directory exists and was left untouched: ${paths.legacyRepo}`);
+    return;
+  }
+
+  const entries = (await fs.readdir(paths.legacyRepo)).filter((entry) => entry !== '.git');
+  const head = await run('git', ['-C', paths.legacyRepo, 'rev-parse', '--verify', 'HEAD'], { timeoutMs: 15000 });
+  if (entries.length || head.code === 0) {
+    warnings.push(`Warning: legacy nested project repo was left untouched because it is not empty: ${paths.legacyRepo}`);
+    return;
+  }
+
+  await fs.rm(paths.legacyRepo, { recursive: true, force: true });
+}
+
 async function ensureProjectRepository(project, paths = projectPaths(project)) {
   await fs.mkdir(paths.repo, { recursive: true });
   const warnings = [];
+  await cleanupLegacyProjectRepository(paths, warnings);
   let created = false;
   if (!(await isGitRepository(paths.repo))) {
     const result = await run('git', ['-C', paths.repo, 'init'], { timeoutMs: 30000 });

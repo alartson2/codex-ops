@@ -111,9 +111,7 @@ prepare_paths() {
   install -d -m 0755 /srv/codex-ops
   install -d -m 0755 /srv/codex-ops/incidents
   install -d -m 0755 /srv/codex-ops/projects/openclaw
-  install -d -m 0755 /srv/codex-ops/projects/openclaw/repo
   install -d -m 0755 /srv/codex-ops/projects/server
-  install -d -m 0755 /srv/codex-ops/projects/server/repo
   install -d -m 0755 /var/lib/codexops/state
   install -d -m 0755 /var/lib/codexops/state/uploads
   install -d -m 0755 /var/lib/codexops/.codex
@@ -121,7 +119,7 @@ prepare_paths() {
 
 ensure_project_repositories() {
   log "Ensuring default project repositories..."
-  for repo in /srv/codex-ops/projects/openclaw/repo /srv/codex-ops/projects/server/repo; do
+  for repo in /srv/codex-ops/projects/openclaw /srv/codex-ops/projects/server; do
     if ! git -C "${repo}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       git -C "${repo}" init >/dev/null
     fi

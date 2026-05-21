@@ -43,7 +43,7 @@ The goal is not to replace SSH completely. The goal is to make the common loop f
 - Native subscription device auth flow (`/codex login`)
 - Persistent lightweight chat state and project-aware context
 - Out-of-the-box project memory files (`CHANGELOG.md`, `NOTES.md`, context, and runbooks)
-- Per-project git repositories under `/srv/codex-ops/projects/<project>/repo`
+- Per-project git repositories rooted at `/srv/codex-ops/projects/<project>`
 - Automatic local git snapshot commits before final Telegram reports when project repository files changed
 - OpenClaw-focused diagnostics and incident note generation
 - Telegram image input for Codex vision-capable investigations
@@ -151,7 +151,7 @@ What is isolated per Telegram chat:
 
 What is shared by the bot instance:
 
-- project repositories under `/srv/codex-ops/projects/<project>/repo`
+- project repositories rooted at `/srv/codex-ops/projects/<project>`
 - project memory files (`CONTEXT.md`, `RUNBOOK.md`, `CHANGELOG.md`, `NOTES.md`)
 - the single active Codex worker and FIFO task queue
 - Codex authentication, host permissions, environment, and service account

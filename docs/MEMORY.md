@@ -6,7 +6,7 @@
 
 On bootstrap and bot startup, these files and directories are created for each project if they are missing:
 
-- `/srv/codex-ops/projects/<project>/repo`: project-local git repository used as the default `codex exec` workspace.
+- `/srv/codex-ops/projects/<project>`: project-local git repository used as the default `codex exec` workspace, including memory files and project artifacts.
 - `/srv/codex-ops/projects/<project>/CONTEXT.md`: project-specific facts and scope.
 - `/srv/codex-ops/projects/<project>/RUNBOOK.md`: project-specific operations checklist.
 - `/srv/codex-ops/projects/<project>/CHANGELOG.md`: project-specific chronological memory for completed changes and planned-but-not-done work.
