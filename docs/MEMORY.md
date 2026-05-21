@@ -30,6 +30,8 @@ Each `codex exec` prompt includes:
 
 This lets Codex see both short-term conversation state and durable project memory.
 
+The prompt also includes request-level context status metadata. This metadata is an estimate of the bot-controlled prompt input size, not an exact model context-window counter. Codex should use it for a qualitative final-report footer and should not invent exact used or remaining context numbers.
+
 ## What belongs in project CHANGELOG.md
 
 Use the active project changelog for chronological state:

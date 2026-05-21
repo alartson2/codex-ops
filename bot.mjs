@@ -43,12 +43,26 @@ const CODEX_STOP_KILL_GRACE_MS = readOptionalNonNegativeMs('CODEX_STOP_KILL_GRAC
 const TELEGRAM_IMAGE_MAX_BYTES = Math.max(1000000, Number(process.env.TELEGRAM_IMAGE_MAX_BYTES || '10000000') || 10000000);
 const PENDING_IMAGE_TTL_MS = readOptionalNonNegativeMs('PENDING_IMAGE_TTL_MS', 1800000, { minPositive: 60000 });
 const PENDING_IMAGE_MAX_ITEMS = Math.min(10, Math.max(1, Number(process.env.PENDING_IMAGE_MAX_ITEMS || '4') || 4));
+const TELEGRAM_VOICE_MAX_BYTES = Math.max(1000000, Number(process.env.TELEGRAM_VOICE_MAX_BYTES || '25000000') || 25000000);
+const VOICE_DRAFT_TTL_MS = readOptionalNonNegativeMs('VOICE_DRAFT_TTL_MS', 1800000, { minPositive: 60000 });
+const OPENROUTER_BASE_URL = (process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/+$/, '');
+const OPENROUTER_API_KEY_FILE = process.env.OPENROUTER_API_KEY_FILE || '';
+const OPENROUTER_SCAN_PROJECT_ENV = !['0', 'false', 'no'].includes(String(process.env.OPENROUTER_SCAN_PROJECT_ENV || '1').trim().toLowerCase());
+const OPENROUTER_STT_MODEL = process.env.OPENROUTER_STT_MODEL || 'openai/whisper-1';
+const OPENROUTER_PLAN_MODEL_RAW = String(process.env.OPENROUTER_PLAN_MODEL || '').trim();
+const OPENROUTER_PLAN_MODEL = ['0', 'false', 'no', 'none', 'off'].includes(OPENROUTER_PLAN_MODEL_RAW.toLowerCase())
+  ? ''
+  : OPENROUTER_PLAN_MODEL_RAW || 'openai/gpt-4o-mini';
+const OPENROUTER_TRANSCRIPTION_LANGUAGE = String(process.env.OPENROUTER_TRANSCRIPTION_LANGUAGE || '').trim();
+const OPENROUTER_TIMEOUT_MS = readOptionalNonNegativeMs('OPENROUTER_TIMEOUT_MS', 60000, { minPositive: 5000 });
 let offset = 0;
 let activeTask = null;
 let activeTaskSeq = 0;
 const taskQueue = [];
 let authFlow = null;
 const TELEGRAM_ALLOWED_UPDATES = ['message', 'edited_message', 'callback_query'];
+const voiceDrafts = new Map();
+const voiceSupplementByChat = new Map();
 
 function readOptionalNonNegativeMs(name, defaultValue, opts = {}) {
   const raw = process.env[name];
@@ -537,6 +551,385 @@ async function downloadTelegramImage(attachment, msg) {
     source: attachment.source || 'telegram',
     ts: new Date().toISOString(),
   };
+}
+
+function audioFormatFromMime(mimeType) {
+  const value = String(mimeType || '').toLowerCase().split(';')[0].trim();
+  if (value === 'audio/ogg' || value === 'audio/oga' || value === 'audio/opus') return 'ogg';
+  if (value === 'audio/mpeg' || value === 'audio/mp3') return 'mp3';
+  if (value === 'audio/mp4' || value === 'audio/x-m4a' || value === 'audio/m4a') return 'm4a';
+  if (value === 'audio/aac') return 'aac';
+  if (value === 'audio/webm') return 'webm';
+  if (value === 'audio/wav' || value === 'audio/x-wav' || value === 'audio/wave') return 'wav';
+  if (value === 'audio/flac' || value === 'audio/x-flac') return 'flac';
+  return '';
+}
+
+function audioFormatFromName(name) {
+  const ext = path.extname(String(name || '')).toLowerCase().replace(/^\./, '');
+  if (ext === 'oga' || ext === 'opus') return 'ogg';
+  if (['ogg', 'mp3', 'm4a', 'aac', 'webm', 'wav', 'flac'].includes(ext)) return ext;
+  return '';
+}
+
+function audioExtensionForFormat(format) {
+  const value = String(format || '').toLowerCase();
+  return ['ogg', 'mp3', 'm4a', 'aac', 'webm', 'wav', 'flac'].includes(value) ? `.${value}` : '.ogg';
+}
+
+function selectTelegramVoiceAttachment(msg) {
+  const voice = msg && msg.voice;
+  if (voice) {
+    return {
+      source: 'voice',
+      fileId: voice.file_id,
+      fileUniqueId: voice.file_unique_id || '',
+      fileSize: Number(voice.file_size) || 0,
+      duration: Math.max(0, Number(voice.duration) || 0),
+      mimeType: voice.mime_type || 'audio/ogg',
+      originalName: `telegram-voice-${msg.message_id || nowStamp()}.ogg`,
+    };
+  }
+  return null;
+}
+
+async function downloadTelegramVoice(attachment, msg) {
+  if (!attachment || !attachment.fileId) throw new Error('Telegram voice has no file_id.');
+  if (attachment.fileSize > TELEGRAM_VOICE_MAX_BYTES) {
+    throw new Error(`Voice message is too large: ${formatBytes(attachment.fileSize)}. Limit: ${formatBytes(TELEGRAM_VOICE_MAX_BYTES)}.`);
+  }
+  const info = await tg('getFile', { file_id: attachment.fileId });
+  const filePath = String(info && info.file_path || '');
+  if (!filePath) throw new Error('Telegram did not return file_path for this voice message.');
+  const declaredSize = Math.max(Number(info.file_size) || 0, Number(attachment.fileSize) || 0);
+  if (declaredSize > TELEGRAM_VOICE_MAX_BYTES) {
+    throw new Error(`Voice message is too large: ${formatBytes(declaredSize)}. Limit: ${formatBytes(TELEGRAM_VOICE_MAX_BYTES)}.`);
+  }
+
+  const res = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`);
+  if (!res.ok) throw new Error(`Telegram file download failed with status ${res.status}.`);
+  const contentLength = Number(res.headers.get('content-length')) || 0;
+  if (contentLength > TELEGRAM_VOICE_MAX_BYTES) {
+    throw new Error(`Voice message is too large: ${formatBytes(contentLength)}. Limit: ${formatBytes(TELEGRAM_VOICE_MAX_BYTES)}.`);
+  }
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (buffer.length > TELEGRAM_VOICE_MAX_BYTES) {
+    throw new Error(`Voice message is too large: ${formatBytes(buffer.length)}. Limit: ${formatBytes(TELEGRAM_VOICE_MAX_BYTES)}.`);
+  }
+
+  const format = audioFormatFromMime(attachment.mimeType) || audioFormatFromName(attachment.originalName) || audioFormatFromName(filePath);
+  if (!format) throw new Error(`Unsupported voice audio format: ${attachment.mimeType || path.extname(filePath) || 'unknown'}.`);
+  const dayDir = new Date().toISOString().slice(0, 10);
+  const targetDir = path.join(UPLOADS_DIR, 'voice', dayDir);
+  await fs.mkdir(targetDir, { recursive: true });
+  const target = path.join(targetDir, `${nowStamp()}-${msg.chat.id}-${msg.message_id || 'msg'}-${randomUUID()}-voice${audioExtensionForFormat(format)}`);
+  await fs.writeFile(target, buffer);
+  return {
+    path: target,
+    originalName: sanitizeUploadName(attachment.originalName || path.basename(filePath)),
+    mimeType: attachment.mimeType || 'audio/*',
+    format,
+    size: buffer.length,
+    duration: attachment.duration || 0,
+    source: attachment.source || 'telegram',
+    ts: new Date().toISOString(),
+  };
+}
+
+function parseEnvValue(raw) {
+  let value = String(raw || '').trim();
+  const hashIndex = value.search(/\s#/);
+  if (hashIndex >= 0) value = value.slice(0, hashIndex).trim();
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    value = value.slice(1, -1);
+  }
+  return value.trim();
+}
+
+function extractOpenRouterApiKey(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  for (const line of lines) {
+    const match = line.match(/^\s*(OPENROUTER_API_KEY|OPENROUTER_TOKEN)\s*=\s*(.+?)\s*$/);
+    if (match) {
+      const value = parseEnvValue(match[2]);
+      if (value) return value;
+    }
+  }
+  return '';
+}
+
+async function readOpenRouterApiKeyFromFile(file, options = {}) {
+  if (!file) return '';
+  try {
+    const text = await fs.readFile(file, 'utf8');
+    return extractOpenRouterApiKey(text) || (options.allowRaw ? parseEnvValue(text) : '');
+  } catch {
+    return '';
+  }
+}
+
+async function discoverProjectOpenRouterApiKey() {
+  if (!OPENROUTER_SCAN_PROJECT_ENV) return '';
+  let entries = [];
+  try {
+    entries = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
+  } catch {
+    return '';
+  }
+  const names = ['.env', '.env.local', 'secrets.env', 'bot.env'];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    for (const name of names) {
+      const key = await readOpenRouterApiKeyFromFile(path.join(PROJECTS_DIR, entry.name, name));
+      if (key) return key;
+    }
+  }
+  return '';
+}
+
+async function getOpenRouterApiKey() {
+  const direct = parseEnvValue(process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_TOKEN || '');
+  if (direct) return direct;
+  const configuredFileKey = await readOpenRouterApiKeyFromFile(OPENROUTER_API_KEY_FILE, { allowRaw: true });
+  if (configuredFileKey) return configuredFileKey;
+  const botEnvKey = await readOpenRouterApiKeyFromFile('/etc/codex-ops/bot.env');
+  if (botEnvKey) return botEnvKey;
+  return discoverProjectOpenRouterApiKey();
+}
+
+async function fetchOpenRouterJson(pathname, body) {
+  const apiKey = await getOpenRouterApiKey();
+  if (!apiKey) throw new Error('OPENROUTER_API_KEY is not set and no project env file with OPENROUTER_API_KEY was found.');
+  const controller = new AbortController();
+  const timer = OPENROUTER_TIMEOUT_MS > 0 ? setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS) : null;
+  try {
+    const res = await fetch(`${OPENROUTER_BASE_URL}${pathname}`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        'content-type': 'application/json',
+        'http-referer': 'https://github.com/alartson2/codex-ops',
+        'x-title': 'codex-ops',
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    let data = null;
+    const text = await res.text();
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;
+    }
+    if (!res.ok) {
+      const detail = data && (data.error && (data.error.message || data.error.code) || data.message) || text || res.statusText;
+      throw new Error(`OpenRouter request failed (${res.status}): ${clip(detail, 500)}`);
+    }
+    return data;
+  } catch (error) {
+    if (error && error.name === 'AbortError') throw new Error(`OpenRouter request timed out after ${formatDurationMs(OPENROUTER_TIMEOUT_MS)}.`);
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function transcribeVoiceWithOpenRouter(voice) {
+  const buffer = await fs.readFile(voice.path);
+  const payload = {
+    model: OPENROUTER_STT_MODEL,
+    input_audio: {
+      data: buffer.toString('base64'),
+      format: voice.format,
+    },
+    temperature: 0,
+  };
+  if (OPENROUTER_TRANSCRIPTION_LANGUAGE) payload.language = OPENROUTER_TRANSCRIPTION_LANGUAGE;
+  const data = await fetchOpenRouterJson('/audio/transcriptions', payload);
+  const text = String(data && data.text || '').trim();
+  if (!text) throw new Error('OpenRouter returned an empty transcription.');
+  return {
+    text,
+    usage: data && data.usage || null,
+  };
+}
+
+function fallbackVoicePlan(transcript) {
+  return [
+    '1. Использовать распознанный текст как запрос оператора.',
+    '2. Проверить активный проект, память проекта и недавний контекст Telegram.',
+    '3. Найти релевантные файлы или сервисы, внести минимальное безопасное изменение и проверить результат.',
+    '4. В финальном отчете кратко перечислить изменения, проверки и оставшиеся риски.',
+    '',
+    `Распознано: ${clip(transcript, 900)}`,
+  ].join('\n');
+}
+
+async function generateVoicePlan(transcript, chatId, project) {
+  if (!OPENROUTER_PLAN_MODEL) return fallbackVoicePlan(transcript);
+  try {
+    const payload = {
+      model: OPENROUTER_PLAN_MODEL,
+      temperature: 0.2,
+      messages: [
+        {
+          role: 'system',
+          content: [
+            'You prepare concise implementation plans for a Telegram bot that controls remote Codex CLI tasks.',
+            'Do not execute the task. Do not claim anything was done.',
+            'Write in Russian. Keep the plan short and practical.',
+            'If the transcript is ambiguous, include a short "Уточнить" line.',
+          ].join(' '),
+        },
+        {
+          role: 'user',
+          content: [
+            `Active project: ${project || DEFAULT_PROJECT}.`,
+            `Telegram chat id: ${chatId}.`,
+            '',
+            'Voice transcript:',
+            transcript,
+            '',
+            'Return only:',
+            'Распознано: <one sentence>',
+            'План:',
+            '1. ...',
+            '2. ...',
+            '3. ...',
+          ].join('\n'),
+        },
+      ],
+    };
+    const data = await fetchOpenRouterJson('/chat/completions', payload);
+    const content = String(data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content || '').trim();
+    return content || fallbackVoicePlan(transcript);
+  } catch (error) {
+    console.warn(`[bot-voice-plan-fallback] chat=${chatId} error=${error && (error.message || String(error))}`);
+    return fallbackVoicePlan(transcript);
+  }
+}
+
+function cleanupVoiceDrafts() {
+  if (VOICE_DRAFT_TTL_MS <= 0) return;
+  const now = Date.now();
+  for (const [id, draft] of voiceDrafts.entries()) {
+    if (now - (draft.updatedAt || draft.createdAt || now) > VOICE_DRAFT_TTL_MS) {
+      voiceDrafts.delete(id);
+      if (voiceSupplementByChat.get(String(draft.chatId)) === id) voiceSupplementByChat.delete(String(draft.chatId));
+    }
+  }
+}
+
+function getVoiceDraft(chatId, id) {
+  cleanupVoiceDrafts();
+  const draft = voiceDrafts.get(String(id || ''));
+  if (!draft || !isSameChat(draft.chatId, chatId)) return null;
+  return draft;
+}
+
+function buildVoiceDraftKeyboard(id) {
+  return {
+    inline_keyboard: [
+      [{ text: 'Отдать в реализацию', callback_data: `voice:run:${id}` }],
+      [{ text: 'Отправить дополнение', callback_data: `voice:add:${id}` }],
+      [{ text: 'Отменить', callback_data: `voice:cancel:${id}` }],
+    ],
+  };
+}
+
+function formatVoiceDraftMessage(draft) {
+  const transcript = clip(draft.transcript, 1200);
+  const plan = clip(draft.plan, 1600);
+  const usageLine = draft.transcriptionUsage && Number.isFinite(Number(draft.transcriptionUsage.seconds))
+    ? `Audio: ${formatDurationMs(Number(draft.transcriptionUsage.seconds) * 1000)}.`
+    : draft.voiceDuration
+      ? `Audio: ${formatDurationMs(Number(draft.voiceDuration) * 1000)}.`
+      : '';
+  return [
+    'Голосовое распознано. Проверьте перед запуском.',
+    usageLine,
+    '',
+    'Расшифровка:',
+    transcript,
+    '',
+    'План:',
+    plan,
+    '',
+    'Codex начнет работу только после кнопки "Отдать в реализацию".',
+  ].filter((line) => line !== '').join('\n');
+}
+
+function buildVoiceImplementationQuestion(draft) {
+  return [
+    'Telegram voice request was transcribed and explicitly approved by the operator.',
+    'Use the transcript as the actual user request. The preliminary plan is only a review aid; adjust it if live evidence requires a better approach.',
+    '',
+    '<voice_transcript>',
+    draft.transcript,
+    '</voice_transcript>',
+    '',
+    '<preliminary_plan>',
+    draft.plan,
+    '</preliminary_plan>',
+  ].join('\n');
+}
+
+async function sendVoiceDraft(chatId, draft) {
+  await sendMessage(chatId, formatVoiceDraftMessage(draft), { reply_markup: buildVoiceDraftKeyboard(draft.id) });
+}
+
+async function createOrUpdateVoiceDraft(chatId, transcript, source = {}, existingDraft = null) {
+  const state = await getChatState(chatId);
+  const now = Date.now();
+  const draft = existingDraft || {
+    id: randomUUID().replace(/-/g, '').slice(0, 12),
+    chatId,
+    project: state.project,
+    transcript: '',
+    plan: '',
+    createdAt: now,
+    updatedAt: now,
+    sourceMessageId: source.messageId || null,
+    voiceDuration: source.voiceDuration || 0,
+    transcriptionUsage: source.transcriptionUsage || null,
+  };
+  draft.project = state.project;
+  draft.transcript = draft.transcript ? `${draft.transcript}\n\nДополнение: ${transcript}` : transcript;
+  draft.updatedAt = now;
+  if (source.messageId) draft.sourceMessageId = source.messageId;
+  if (source.voiceDuration) draft.voiceDuration = source.voiceDuration;
+  if (source.transcriptionUsage) draft.transcriptionUsage = source.transcriptionUsage;
+  draft.plan = await generateVoicePlan(draft.transcript, chatId, draft.project);
+  voiceDrafts.set(draft.id, draft);
+  voiceSupplementByChat.delete(String(chatId));
+  await sendVoiceDraft(chatId, draft);
+}
+
+async function handleVoiceMessage(chatId, msg, attachment) {
+  await sendMessage(chatId, 'Голосовое получено, распознаю через OpenRouter...');
+  let voice = null;
+  try {
+    voice = await downloadTelegramVoice(attachment, msg);
+  } catch (error) {
+    await sendMessage(chatId, `Could not download voice message: ${error.message}`);
+    return;
+  }
+  let transcription = null;
+  try {
+    transcription = await transcribeVoiceWithOpenRouter(voice);
+  } catch (error) {
+    await sendMessage(chatId, `Could not transcribe voice message: ${error.message}`);
+    return;
+  }
+  const supplementDraftId = voiceSupplementByChat.get(String(chatId));
+  const draft = supplementDraftId ? getVoiceDraft(chatId, supplementDraftId) : null;
+  const caption = normalizeTelegramText(msg.caption || '');
+  const transcriptText = caption ? `${transcription.text}\n\nКомментарий к голосовому: ${caption}` : transcription.text;
+  await createOrUpdateVoiceDraft(chatId, transcriptText, {
+    messageId: msg.message_id,
+    voiceDuration: voice.duration,
+    transcriptionUsage: transcription.usage,
+  }, draft);
 }
 
 function stripAnsi(text) {
@@ -1352,6 +1745,18 @@ function formatHistory(history) {
   return items.map((item, index) => `${index + 1}. ${item.role === 'assistant' ? 'Assistant' : 'User'}: ${item.text}`).join('\n\n');
 }
 
+function estimateTokensForChars(chars) {
+  const value = Math.max(0, Number(chars) || 0);
+  return Math.max(1, Math.ceil(value / 4));
+}
+
+function contextPressureForTokens(tokens) {
+  const value = Number(tokens) || 0;
+  if (value >= 60000) return 'high';
+  if (value >= 25000) return 'medium';
+  return 'low';
+}
+
 async function buildQuestionPrompt(question, options = {}) {
   const chatState = options.chatId == null ? emptyChatState(DEFAULT_PROJECT) : await getChatState(options.chatId);
   const activeProject = normalizeProjectName(options.project || chatState.project) || DEFAULT_PROJECT;
@@ -1366,6 +1771,20 @@ async function buildQuestionPrompt(question, options = {}) {
   const historyText = options.disableHistory ? '(disabled for this request)' : formatHistory(chatState.history);
   const historical = activeProject === 'openclaw' ? await latestIncident('openclaw') : await latestIncident(activeProject);
   const historicalText = historical ? `${historical.name}\n\n${compactIncidentForPrompt(historical.text)}` : '';
+  const promptContextChars = [
+    opsContext,
+    globalRunbook,
+    projectContext,
+    projectRunbook,
+    projectChangelog,
+    projectNotes,
+    historyText,
+    historicalText,
+    attachmentsText,
+    question,
+  ].join('\n').length;
+  const approxPromptTokens = estimateTokensForChars(promptContextChars);
+  const contextPressure = contextPressureForTokens(approxPromptTokens);
   return [
     'You are the host-level Codex ops assistant for this server.',
     'Primary mission: OpenClaw administration and incident response.',
@@ -1384,6 +1803,16 @@ async function buildQuestionPrompt(question, options = {}) {
     'When Telegram image attachments are present, inspect the images passed via codex exec --image and answer using their visual content.',
     'Prefer direct practical answers and mention real uncertainty briefly when needed.',
     'Some project workspaces may live inside the OpenClaw container rather than on the host.',
+    'For every final working report, end with a short context status footer.',
+    'Context status footer rule: do not invent exact total context-window usage, percentages, or remaining-token counts. Exact model-context counters are not exposed inside this Telegram bridge unless a reliable runtime counter is explicitly available.',
+    'Use the request context metadata below to give a qualitative context pressure estimate. Report exact remaining capacity as unavailable when it is unavailable.',
+    'A good footer is concise: context pressure low/medium/high; approximate prompt input size if useful; exact used/remaining counters unavailable.',
+    '',
+    '<request_context_status_metadata>',
+    `Approximate codex-ops prompt input before assistant work: ${approxPromptTokens} tokens (${promptContextChars} chars), plus Codex/system/tool overhead.`,
+    `Qualitative context pressure estimate for this request: ${contextPressure}.`,
+    'Exact total model context used and exact remaining context are not available from this bridge. Do not fabricate exact numbers.',
+    '</request_context_status_metadata>',
     '',
     '<ops_context>',
     opsContext,
@@ -1712,6 +2141,45 @@ async function handleCallback(callbackQuery) {
   if (data.startsWith('codex:reasoning:')) {
     await answerCallbackQuery(callbackQuery.id, 'Setting reasoning');
     await setCodexReasoning(chatId, data.slice('codex:reasoning:'.length));
+    return;
+  }
+  if (data.startsWith('voice:run:')) {
+    const draftId = data.slice('voice:run:'.length);
+    const draft = getVoiceDraft(chatId, draftId);
+    if (!draft) {
+      await answerCallbackQuery(callbackQuery.id, 'Voice draft expired');
+      await sendMessage(chatId, 'Голосовой черновик не найден или истек. Отправьте голосовое еще раз.');
+      return;
+    }
+    voiceDrafts.delete(draft.id);
+    if (voiceSupplementByChat.get(String(chatId)) === draft.id) voiceSupplementByChat.delete(String(chatId));
+    await answerCallbackQuery(callbackQuery.id, 'Starting Codex');
+    await editMessage(chatId, messageId, 'Голосовой запрос подтвержден. Передаю в реализацию...');
+    await runUserCodexRequest(chatId, buildVoiceImplementationQuestion(draft), [], { messageId: draft.sourceMessageId || null });
+    return;
+  }
+  if (data.startsWith('voice:add:')) {
+    const draftId = data.slice('voice:add:'.length);
+    const draft = getVoiceDraft(chatId, draftId);
+    if (!draft) {
+      await answerCallbackQuery(callbackQuery.id, 'Voice draft expired');
+      await sendMessage(chatId, 'Голосовой черновик не найден или истек. Отправьте голосовое еще раз.');
+      return;
+    }
+    voiceSupplementByChat.set(String(chatId), draft.id);
+    await answerCallbackQuery(callbackQuery.id, 'Waiting for supplement');
+    await sendMessage(chatId, 'Ок, пришлите дополнение текстом или голосом. Я обновлю расшифровку и план, не запуская Codex.');
+    return;
+  }
+  if (data.startsWith('voice:cancel:')) {
+    const draftId = data.slice('voice:cancel:'.length);
+    const draft = getVoiceDraft(chatId, draftId);
+    if (draft) {
+      voiceDrafts.delete(draft.id);
+      if (voiceSupplementByChat.get(String(chatId)) === draft.id) voiceSupplementByChat.delete(String(chatId));
+    }
+    await answerCallbackQuery(callbackQuery.id, 'Canceled');
+    await editMessage(chatId, messageId, 'Голосовой запрос отменен.');
     return;
   }
   await answerCallbackQuery(callbackQuery.id, 'Unknown action');
@@ -2068,6 +2536,11 @@ async function handleMessage(msg) {
     await sendMessage(chatId, 'Access denied.');
     return;
   }
+  const voiceAttachment = selectTelegramVoiceAttachment(msg);
+  if (voiceAttachment) {
+    await handleVoiceMessage(chatId, msg, voiceAttachment);
+    return;
+  }
   const attachment = selectTelegramImageAttachment(msg);
   if (attachment) {
     await handleImageMessage(chatId, msg, msg.caption || '', attachment);
@@ -2076,6 +2549,20 @@ async function handleMessage(msg) {
   if (msg.document) {
     await sendMessage(chatId, 'This file type is not supported yet. Send a Telegram photo or an image document.');
     return;
+  }
+  const supplementDraftId = voiceSupplementByChat.get(String(chatId));
+  if (supplementDraftId) {
+    const supplementText = questionTextFromTelegramText(msg.text || '');
+    if (supplementText) {
+      const draft = getVoiceDraft(chatId, supplementDraftId);
+      if (!draft) {
+        voiceSupplementByChat.delete(String(chatId));
+        await sendMessage(chatId, 'Голосовой черновик истек. Отправьте голосовое еще раз.');
+        return;
+      }
+      await createOrUpdateVoiceDraft(chatId, supplementText, { messageId: msg.message_id }, draft);
+      return;
+    }
   }
   await handle(chatId, msg.text || '', { messageId: msg.message_id });
 }
@@ -2131,6 +2618,7 @@ async function handle(chatId, text, source = {}) {
       'Regular text messages are treated as direct questions to Codex.',
       'If Codex is already working, regular requests are queued automatically.',
       'Telegram photos and image documents can be sent with a caption, or saved for the next text question.',
+      'Telegram voice messages are transcribed first, then shown as a plan with confirm/supplement/cancel buttons.',
       'Edit a queued Telegram request before it starts to update the queued text.',
       'Commands:',
       '/ask <question>',
