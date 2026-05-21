@@ -1602,7 +1602,7 @@ async function ensureProjectRepository(project, paths = projectPaths(project)) {
   }
   const remotes = await gitRemoteNames(paths.repo);
   if (!remotes.length) {
-    warnings.push(`Warning: project repository has no git remote yet, so there is nowhere to push. Repository: ${paths.repo}`);
+    warnings.push(`Note: project repository has no git remote; local snapshot commits can still be created, but nothing will be pushed. Repository: ${paths.repo}`);
   }
   return { path: paths.repo, created, remotes, warnings };
 }
