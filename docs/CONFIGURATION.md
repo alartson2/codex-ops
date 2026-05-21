@@ -25,10 +25,13 @@ The bot can wake itself up from durable request files. This is the preferred mec
 
 - `HOST_REQUEST_POLL_INTERVAL_MS` (default: `3600000`): interval for scanning host request queues. Set `0` to disable.
 - `HOST_REQUEST_STARTUP_DELAY_MS` (default: `30000`): startup delay before the first scan, so already-pending files are picked up soon after restart.
+- `HOST_REQUEST_RUNNING_STALE_MS` (default: `21600000`): age after which a `running/` request with no in-memory task is moved back to `pending/` for retry. Set `0` to disable recovery.
 - `HOST_REQUEST_DIR_NAMES` (default: `host-requests,staging-requests,scheduled-requests`): per-project queue directory names scanned under each `/srv/codex-ops/projects/<project>`.
 - `HOST_REQUEST_DIRS`: semicolon/comma/newline-separated extra absolute queue directories. Defaults include `$STATE_DIR/host-requests`, `$STATE_DIR/scheduled-requests`, and OpenClaw runtime mirror request directories under `/data/.openclaw/team-memory`.
 
-Each queue may contain Markdown, text, or JSON files directly in the queue directory or in its `pending/` subdirectory. Processed files are moved to `running/`, then `done/`; failures move to `failed/`.
+Each queue may contain Markdown, text, or JSON files directly in the queue directory or in its `pending/` subdirectory. The bot ignores `README.md`, `.gitkeep`, and files whose names start with `_`. Picked files move to `running/`; they move to `done/` only after the Codex task completes successfully, or to `failed/` when the task fails.
+
+For a one-shot smoke test, run the service environment with `CODEX_OPS_HOST_REQUEST_POLL_ONCE=1 node /opt/codex-ops/bot.mjs`. The process scans due requests, waits for any started tasks to finish, and exits instead of entering the Telegram polling loop.
 
 Markdown request example:
 

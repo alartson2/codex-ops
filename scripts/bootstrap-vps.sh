@@ -115,8 +115,20 @@ prepare_paths() {
   install -d -m 0755 /srv/codex-ops/incidents
   install -d -m 0755 /srv/codex-ops/projects/openclaw
   install -d -m 0755 /srv/codex-ops/projects/server
+  for project in openclaw server; do
+    for queue in host-requests staging-requests scheduled-requests; do
+      for status in pending running done failed; do
+        install -d -m 0755 "/srv/codex-ops/projects/${project}/${queue}/${status}"
+      done
+    done
+  done
   install -d -m 0755 /var/lib/codexops/state
   install -d -m 0755 /var/lib/codexops/state/uploads
+  for queue in host-requests scheduled-requests; do
+    for status in pending running done failed; do
+      install -d -m 0755 "/var/lib/codexops/state/${queue}/${status}"
+    done
+  done
   install -d -m 0755 /var/lib/codexops/.codex
 }
 

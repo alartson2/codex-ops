@@ -50,6 +50,7 @@ const HOST_REQUEST_EXTRA_DIRS = readListEnv('HOST_REQUEST_DIRS', [
   '/data/.openclaw/team-memory/staging-requests',
   '/data/.openclaw/team-memory/scheduled-requests',
 ]);
+const HOST_REQUEST_RUNNING_STALE_MS = readOptionalNonNegativeMs('HOST_REQUEST_RUNNING_STALE_MS', 21600000, { minPositive: 60000 });
 const TELEGRAM_IMAGE_MAX_BYTES = Math.max(1000000, Number(process.env.TELEGRAM_IMAGE_MAX_BYTES || '10000000') || 10000000);
 const PENDING_IMAGE_TTL_MS = readOptionalNonNegativeMs('PENDING_IMAGE_TTL_MS', 1800000, { minPositive: 60000 });
 const PENDING_IMAGE_MAX_ITEMS = Math.min(10, Math.max(1, Number(process.env.PENDING_IMAGE_MAX_ITEMS || '4') || 4));
@@ -210,7 +211,7 @@ function renderActiveTaskForChat(chatId = null) {
   ].join('\n');
 }
 
-function createActiveTask({ id = null, chatId, kind = 'request', project = DEFAULT_PROJECT, question = '', images = [], resumeLast = false, previousTaskId = null, sourceMessageId = null, queuedAt = null }) {
+function createActiveTask({ id = null, chatId, kind = 'request', project = DEFAULT_PROJECT, question = '', images = [], resumeLast = false, previousTaskId = null, sourceMessageId = null, queuedAt = null, hostRequest = null }) {
   const taskId = Number.isInteger(Number(id)) && Number(id) > 0 ? Number(id) : ++activeTaskSeq;
   activeTaskSeq = Math.max(activeTaskSeq, taskId);
   const task = {
@@ -231,13 +232,14 @@ function createActiveTask({ id = null, chatId, kind = 'request', project = DEFAU
     stopRequested: false,
     stopReason: '',
     steerText: '',
+    hostRequest,
     promise: null,
   };
   activeTask = task;
   return task;
 }
 
-function createQueuedTask({ chatId, kind = 'request', project = DEFAULT_PROJECT, question = '', images = [], sourceMessageId = null }) {
+function createQueuedTask({ chatId, kind = 'request', project = DEFAULT_PROJECT, question = '', images = [], sourceMessageId = null, hostRequest = null }) {
   return {
     id: ++activeTaskSeq,
     chatId,
@@ -246,6 +248,7 @@ function createQueuedTask({ chatId, kind = 'request', project = DEFAULT_PROJECT,
     question: String(question || ''),
     images: Array.isArray(images) ? images.map(normalizePendingImage).filter(Boolean) : [],
     sourceMessageId,
+    hostRequest,
     queuedAt: Date.now(),
     updatedAt: 0,
   };
@@ -1635,7 +1638,12 @@ async function listHostRequestFilesInDir(dir, queueRoot, fallbackProject) {
     return [];
   }
   return entries
-    .filter((entry) => entry.isFile() && ['.md', '.txt', '.json'].includes(path.extname(entry.name).toLowerCase()))
+    .filter((entry) => {
+      if (!entry.isFile()) return false;
+      const lowerName = entry.name.toLowerCase();
+      if (lowerName === 'readme.md' || lowerName === '.gitkeep' || lowerName.startsWith('_')) return false;
+      return ['.md', '.txt', '.json'].includes(path.extname(entry.name).toLowerCase());
+    })
     .map((entry) => ({
       file: path.join(dir, entry.name),
       name: entry.name,
@@ -1665,6 +1673,39 @@ async function collectHostRequestFiles() {
     .sort((a, b) => a.file.localeCompare(b.file));
 }
 
+function taskHostRequestFile(task) {
+  return task && task.hostRequest && task.hostRequest.file ? path.resolve(task.hostRequest.file) : '';
+}
+
+function isHostRequestFileInMemory(file) {
+  const target = path.resolve(file);
+  if (taskHostRequestFile(activeTask) === target) return true;
+  return taskQueue.some((task) => taskHostRequestFile(task) === target);
+}
+
+async function recoverStaleRunningHostRequests() {
+  if (HOST_REQUEST_RUNNING_STALE_MS <= 0) return 0;
+  let recovered = 0;
+  const now = Date.now();
+  for (const source of await collectHostRequestSources()) {
+    const runningDir = path.join(source.dir, 'running');
+    if (!await directoryExists(runningDir)) continue;
+    for (const item of await listHostRequestFilesInDir(runningDir, source.dir, source.fallbackProject)) {
+      if (isHostRequestFileInMemory(item.file)) continue;
+      let stat = null;
+      try {
+        stat = await fs.stat(item.file);
+      } catch {
+        continue;
+      }
+      if (now - stat.mtimeMs < HOST_REQUEST_RUNNING_STALE_MS) continue;
+      await moveHostRequestFile(item, 'pending');
+      recovered += 1;
+    }
+  }
+  return recovered;
+}
+
 async function moveHostRequestFile(item, status) {
   const targetDir = path.join(item.queueRoot, status);
   await fs.mkdir(targetDir, { recursive: true });
@@ -1677,18 +1718,35 @@ async function moveHostRequestFile(item, status) {
   return target;
 }
 
+async function completeHostRequestTask(task, status) {
+  if (!task || !task.hostRequest || !task.hostRequest.file) return;
+  const requestFile = task.hostRequest.file;
+  if (!await fileExists(requestFile)) return;
+  try {
+    const target = await moveHostRequestFile({
+      file: requestFile,
+      name: path.basename(requestFile),
+      queueRoot: task.hostRequest.queueRoot,
+      fallbackProject: task.project || DEFAULT_PROJECT,
+    }, status);
+    task.hostRequest = { ...task.hostRequest, file: target, completed: status };
+  } catch (error) {
+    console.error(`[host-request-complete-error] task=${task.id} file=${requestFile} status=${status} error=${error && (error.stack || error.message)}`);
+  }
+}
+
 async function enqueueProjectCodexRequest(chatId, project, question, source = {}) {
   const safeProject = normalizeProjectName(project) || DEFAULT_PROJECT;
   await ensureProjectFiles(safeProject);
   const taskKind = source.kind || 'host-request';
   if (activeTask || taskQueue.length) {
-    const queued = createQueuedTask({ chatId, kind: taskKind, project: safeProject, question, images: [], sourceMessageId: null });
+    const queued = createQueuedTask({ chatId, kind: taskKind, project: safeProject, question, images: [], sourceMessageId: null, hostRequest: source.hostRequest || null });
     taskQueue.push(queued);
     await sendQueuedTaskMessage(chatId, queued);
     if (!activeTask) startNextQueuedTask();
     return queued;
   }
-  const task = createActiveTask({ chatId, kind: taskKind, project: safeProject, question, images: [], sourceMessageId: null });
+  const task = createActiveTask({ chatId, kind: taskKind, project: safeProject, question, images: [], sourceMessageId: null, hostRequest: source.hostRequest || null });
   startCodexTask(task);
   return task;
 }
@@ -1701,13 +1759,23 @@ async function processHostRequestFile(item) {
   if (request.runAt && request.runAt > Date.now()) return false;
   const runningFile = await moveHostRequestFile(item, 'running');
   const title = request.title ? `${request.title}\n` : '';
-  await sendMessage(request.chatId, [
-    'Host request picked up.',
-    `Project: ${request.project}`,
-    `${title}Source: ${runningFile}`,
-  ].filter(Boolean).join('\n'));
-  await enqueueProjectCodexRequest(request.chatId, request.project, request.question, { kind: 'host-request' });
-  await moveHostRequestFile({ ...item, file: runningFile, name: path.basename(runningFile) }, 'done');
+  try {
+    await sendMessage(request.chatId, [
+      'Host request picked up.',
+      `Project: ${request.project}`,
+      `${title}Source: ${runningFile}`,
+    ].filter(Boolean).join('\n'));
+    await enqueueProjectCodexRequest(request.chatId, request.project, request.question, {
+      kind: 'host-request',
+      hostRequest: {
+        file: runningFile,
+        queueRoot: item.queueRoot,
+      },
+    });
+  } catch (error) {
+    await moveHostRequestFile({ ...item, file: runningFile, name: path.basename(runningFile) }, 'failed');
+    throw error;
+  }
   return true;
 }
 
@@ -1715,6 +1783,7 @@ async function pollHostRequests(reason = 'interval') {
   if (hostRequestPollRunning) return;
   hostRequestPollRunning = true;
   try {
+    const recovered = await recoverStaleRunningHostRequests();
     const files = await collectHostRequestFiles();
     let processed = 0;
     for (const item of files) {
@@ -1731,17 +1800,41 @@ async function pollHostRequests(reason = 'interval') {
         }
       }
     }
-    if (processed > 0) console.warn(`[host-request-poll] reason=${reason} processed=${processed}`);
+    if (processed > 0 || recovered > 0) console.warn(`[host-request-poll] reason=${reason} recovered=${recovered} processed=${processed}`);
   } finally {
     hostRequestPollRunning = false;
   }
 }
 
+async function runHostRequestPollOnce() {
+  await fs.mkdir(STATE_DIR, { recursive: true });
+  await fs.mkdir(UPLOADS_DIR, { recursive: true });
+  await fs.mkdir(PROJECTS_DIR, { recursive: true });
+  await ensureProjectFiles('openclaw');
+  await ensureProjectFiles('server');
+  await ensureHostRequestQueueDirs();
+  await pollHostRequests('manual-once');
+  while (activeTask || taskQueue.length) {
+    if (activeTask && activeTask.promise) {
+      await activeTask.promise;
+      continue;
+    }
+    if (!activeTask && !startNextQueuedTask()) break;
+    await sleep(250);
+  }
+}
+
 async function ensureHostRequestQueueDirs() {
-  for (const dir of uniqueItems([
+  const dirs = [
     path.join(STATE_DIR, 'host-requests'),
     path.join(STATE_DIR, 'scheduled-requests'),
-  ])) {
+  ];
+  for (const project of await listProjects()) {
+    for (const name of HOST_REQUEST_DIR_NAMES) {
+      dirs.push(path.join(PROJECTS_DIR, project, name));
+    }
+  }
+  for (const dir of uniqueItems(dirs)) {
     await fs.mkdir(path.join(dir, 'pending'), { recursive: true });
     await fs.mkdir(path.join(dir, 'running'), { recursive: true });
     await fs.mkdir(path.join(dir, 'done'), { recursive: true });
@@ -2831,6 +2924,7 @@ async function finishActiveTask(task) {
 async function handleTaskUnhandledError(task, error) {
   console.error(`[bot-task-error] task=${task && task.id} error=${error && (error.stack || error.message)}`);
   if (activeTask && task && activeTask.id === task.id) activeTask = null;
+  await completeHostRequestTask(task, 'failed');
   if (task && !task.stopRequested) {
     try {
       await sendMessage(task.chatId, `Request failed: ${error.message || String(error)}`);
@@ -2854,6 +2948,7 @@ async function finalizeActiveTask(task) {
 }
 
 async function executeUserCodexRequest(task) {
+  let completedSuccessfully = false;
   try {
     const imageLine = task.images.length ? `\nImages: ${task.images.length}` : '';
     const paths = await ensureProjectFiles(task.project);
@@ -2883,12 +2978,14 @@ async function executeUserCodexRequest(task) {
     const historyQuestion = [task.question, imageHistorySuffix(task.images)].filter(Boolean).join('\n');
     await updateChatState(task.chatId, async (current) => appendExchange({ ...current, project: task.project, pendingImages: [] }, historyQuestion, finalAnswer));
     await sendMessage(task.chatId, finalAnswer);
+    completedSuccessfully = true;
   } catch (error) {
     if (!task.stopRequested) {
       console.error(`[bot-user-task-error] task=${task.id} error=${error && (error.stack || error.message)}`);
       await sendMessage(task.chatId, `Request failed: ${error.message || String(error)}`);
     }
   } finally {
+    await completeHostRequestTask(task, completedSuccessfully ? 'done' : 'failed');
     clearActiveTaskChild(task);
     await finalizeActiveTask(task);
   }
@@ -2955,6 +3052,7 @@ function startNextQueuedTask() {
     images: queued.images,
     sourceMessageId: queued.sourceMessageId,
     queuedAt: queued.queuedAt,
+    hostRequest: queued.hostRequest || null,
   });
   startCodexTask(task);
   return true;
@@ -3549,12 +3647,16 @@ async function poll() {
 
 async function main() {
   if (!BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN is not set');
+  if (String(process.env.CODEX_OPS_HOST_REQUEST_POLL_ONCE || '').trim() === '1') {
+    await runHostRequestPollOnce();
+    return;
+  }
   await fs.mkdir(STATE_DIR, { recursive: true });
   await fs.mkdir(UPLOADS_DIR, { recursive: true });
   await fs.mkdir(PROJECTS_DIR, { recursive: true });
-  await ensureHostRequestQueueDirs();
   await ensureProjectFiles('openclaw');
   await ensureProjectFiles('server');
+  await ensureHostRequestQueueDirs();
   await initializeOffset();
   startHostRequestPoller();
   await poll();

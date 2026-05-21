@@ -34,6 +34,8 @@ Deploys replace `/opt/codex-ops` from the repository, so self-modifying runtime 
 
 The bot scans these directories, plus extra paths configured by `HOST_REQUEST_DIRS`. A request file can be Markdown, text, or JSON. Markdown front matter or JSON fields may set `project`, `chatId`, `title`, and `runAt`. If `runAt` is in the future, the file stays pending until a later scan.
 
+Files move from `pending/` to `running/` when picked up, then to `done/` only after the associated Codex task completes successfully. Failures move to `failed/`. Stale `running/` files are retried after `HOST_REQUEST_RUNNING_STALE_MS`, unless they still belong to the current in-memory active or queued task. Service files such as `README.md`, `.gitkeep`, and names starting with `_` are ignored.
+
 Use these queues for delayed follow-up and autonomous checks. Use source changes plus deploy for permanent bot behavior changes.
 
 ## How Codex sees the memory
