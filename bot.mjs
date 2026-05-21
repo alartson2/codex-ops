@@ -815,12 +815,12 @@ async function transcribeVoiceWithOpenRouter(voice) {
 
 function fallbackVoicePlan(transcript) {
   return [
-    '1. Использовать распознанный текст как запрос оператора.',
-    '2. Проверить активный проект, память проекта и недавний контекст Telegram.',
-    '3. Найти релевантные файлы или сервисы, внести минимальное безопасное изменение и проверить результат.',
-    '4. В финальном отчете кратко перечислить изменения, проверки и оставшиеся риски.',
+    '1. Use the recognized text as the operator request.',
+    '2. Check the active project, project memory, and recent Telegram context.',
+    '3. Find relevant files or services, make the smallest safe change, and verify the result.',
+    '4. In the final report, briefly list changes, checks, and remaining risks.',
     '',
-    `Распознано: ${clip(transcript, 900)}`,
+    `Recognized: ${clip(transcript, 900)}`,
   ].join('\n');
 }
 
@@ -836,8 +836,8 @@ async function generateVoicePlan(transcript, chatId, project) {
           content: [
             'You prepare concise implementation plans for a Telegram bot that controls remote Codex CLI tasks.',
             'Do not execute the task. Do not claim anything was done.',
-            'Write in Russian. Keep the plan short and practical.',
-            'If the transcript is ambiguous, include a short "Уточнить" line.',
+            'Write in English. Keep the plan short and practical.',
+            'If the transcript is ambiguous, include a short "Clarify" line.',
           ].join(' '),
         },
         {
@@ -850,8 +850,8 @@ async function generateVoicePlan(transcript, chatId, project) {
             transcript,
             '',
             'Return only:',
-            'Распознано: <one sentence>',
-            'План:',
+            'Recognized: <one sentence>',
+            'Plan:',
             '1. ...',
             '2. ...',
             '3. ...',
@@ -889,9 +889,9 @@ function getVoiceDraft(chatId, id) {
 function buildVoiceDraftKeyboard(id) {
   return {
     inline_keyboard: [
-      [{ text: 'Отдать в реализацию', callback_data: `voice:run:${id}` }],
-      [{ text: 'Отправить дополнение', callback_data: `voice:add:${id}` }],
-      [{ text: 'Отменить', callback_data: `voice:cancel:${id}` }],
+      [{ text: 'Run implementation', callback_data: `voice:run:${id}` }],
+      [{ text: 'Add supplement', callback_data: `voice:add:${id}` }],
+      [{ text: 'Cancel', callback_data: `voice:cancel:${id}` }],
     ],
   };
 }
@@ -905,16 +905,16 @@ function formatVoiceDraftMessage(draft) {
       ? `Audio: ${formatDurationMs(Number(draft.voiceDuration) * 1000)}.`
       : '';
   return [
-    'Голосовое распознано. Проверьте перед запуском.',
+    'Voice message recognized. Review before starting.',
     usageLine,
     '',
-    'Расшифровка:',
+    'Transcript:',
     transcript,
     '',
-    'План:',
+    'Plan:',
     plan,
     '',
-    'Codex начнет работу только после кнопки "Отдать в реализацию".',
+    'Codex will start only after you press "Run implementation".',
   ].filter((line) => line !== '').join('\n');
 }
 
@@ -953,7 +953,7 @@ async function createOrUpdateVoiceDraft(chatId, transcript, source = {}, existin
     transcriptionUsage: source.transcriptionUsage || null,
   };
   draft.project = state.project;
-  draft.transcript = draft.transcript ? `${draft.transcript}\n\nДополнение: ${transcript}` : transcript;
+  draft.transcript = draft.transcript ? `${draft.transcript}\n\nSupplement: ${transcript}` : transcript;
   draft.updatedAt = now;
   if (source.messageId) draft.sourceMessageId = source.messageId;
   if (source.voiceDuration) draft.voiceDuration = source.voiceDuration;
@@ -965,7 +965,7 @@ async function createOrUpdateVoiceDraft(chatId, transcript, source = {}, existin
 }
 
 async function handleVoiceMessage(chatId, msg, attachment) {
-  await sendMessage(chatId, 'Голосовое получено, распознаю через OpenRouter...');
+  await sendMessage(chatId, 'Voice message received; transcribing through OpenRouter...');
   let voice = null;
   try {
     voice = await downloadTelegramVoice(attachment, msg);
@@ -983,7 +983,7 @@ async function handleVoiceMessage(chatId, msg, attachment) {
   const supplementDraftId = voiceSupplementByChat.get(String(chatId));
   const draft = supplementDraftId ? getVoiceDraft(chatId, supplementDraftId) : null;
   const caption = normalizeTelegramText(msg.caption || '');
-  const transcriptText = caption ? `${transcription.text}\n\nКомментарий к голосовому: ${caption}` : transcription.text;
+  const transcriptText = caption ? `${transcription.text}\n\nVoice caption: ${caption}` : transcription.text;
   await createOrUpdateVoiceDraft(chatId, transcriptText, {
     messageId: msg.message_id,
     voiceDuration: voice.duration,
@@ -2863,13 +2863,13 @@ async function handleCallback(callbackQuery) {
     const draft = getVoiceDraft(chatId, draftId);
     if (!draft) {
       await answerCallbackQuery(callbackQuery.id, 'Voice draft expired');
-      await sendMessage(chatId, 'Голосовой черновик не найден или истек. Отправьте голосовое еще раз.');
+      await sendMessage(chatId, 'Voice draft was not found or expired. Send the voice message again.');
       return;
     }
     voiceDrafts.delete(draft.id);
     if (voiceSupplementByChat.get(String(chatId)) === draft.id) voiceSupplementByChat.delete(String(chatId));
     await answerCallbackQuery(callbackQuery.id, 'Starting Codex');
-    await editMessage(chatId, messageId, 'Голосовой запрос подтвержден. Передаю в реализацию...');
+    await editMessage(chatId, messageId, 'Voice request confirmed. Sending it to implementation...');
     await runUserCodexRequest(chatId, buildVoiceImplementationQuestion(draft), [], { messageId: draft.sourceMessageId || null });
     return;
   }
@@ -2878,12 +2878,12 @@ async function handleCallback(callbackQuery) {
     const draft = getVoiceDraft(chatId, draftId);
     if (!draft) {
       await answerCallbackQuery(callbackQuery.id, 'Voice draft expired');
-      await sendMessage(chatId, 'Голосовой черновик не найден или истек. Отправьте голосовое еще раз.');
+      await sendMessage(chatId, 'Voice draft was not found or expired. Send the voice message again.');
       return;
     }
     voiceSupplementByChat.set(String(chatId), draft.id);
     await answerCallbackQuery(callbackQuery.id, 'Waiting for supplement');
-    await sendMessage(chatId, 'Ок, пришлите дополнение текстом или голосом. Я обновлю расшифровку и план, не запуская Codex.');
+    await sendMessage(chatId, 'Okay, send the supplement as text or voice. I will update the transcript and plan without starting Codex.');
     return;
   }
   if (data.startsWith('voice:cancel:')) {
@@ -2894,7 +2894,7 @@ async function handleCallback(callbackQuery) {
       if (voiceSupplementByChat.get(String(chatId)) === draft.id) voiceSupplementByChat.delete(String(chatId));
     }
     await answerCallbackQuery(callbackQuery.id, 'Canceled');
-    await editMessage(chatId, messageId, 'Голосовой запрос отменен.');
+    await editMessage(chatId, messageId, 'Voice request canceled.');
     return;
   }
   await answerCallbackQuery(callbackQuery.id, 'Unknown action');
@@ -3300,7 +3300,7 @@ async function handleMessage(msg) {
       const draft = getVoiceDraft(chatId, supplementDraftId);
       if (!draft) {
         voiceSupplementByChat.delete(String(chatId));
-        await sendMessage(chatId, 'Голосовой черновик истек. Отправьте голосовое еще раз.');
+        await sendMessage(chatId, 'Voice draft expired. Send the voice message again.');
         return;
       }
       await createOrUpdateVoiceDraft(chatId, supplementText, { messageId: msg.message_id }, draft);
