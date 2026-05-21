@@ -102,6 +102,9 @@ deploy_tree() {
     --exclude '.git' \
     --exclude '.idea' \
     --exclude '.vscode' \
+    --exclude '.local' \
+    --exclude 'local' \
+    --exclude '*.local' \
     "${REPO_DIR}/" /opt/codex-ops/
 }
 

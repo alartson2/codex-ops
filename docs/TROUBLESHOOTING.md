@@ -35,7 +35,7 @@ When Codex does not return final output, bot writes diagnostics into `STATE_DIR`
 
 Use these files to inspect stdout/stderr and decide whether the issue is auth, timeout, or model-side.
 
-## Native auth returns 403
+## Native auth returns 401 or 403
 
 Perform full auth refresh:
 
@@ -44,6 +44,8 @@ sudo /opt/codex-ops/scripts/codex-auth.sh logout
 sudo /opt/codex-ops/scripts/codex-auth.sh login
 sudo systemctl restart codex-telegram-bot.service
 ```
+
+From Telegram, `/codex login` refreshes stored auth before starting a new device login code. Use `/codex login keep` only when you explicitly want to try device login without clearing existing auth state.
 
 ## Docker access issues for codexops user
 

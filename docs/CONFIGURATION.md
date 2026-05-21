@@ -17,6 +17,41 @@ All runtime configuration is loaded from `/etc/codex-ops/bot.env`.
 - `HOST_LABEL` (default: hostname): display label in bot responses.
 - `ASSISTANT_LANGUAGE` (default: `Russian`): language instruction passed into Codex prompts.
 
+## Durable host request queues
+
+The deployed application tree under `/opt/codex-ops` is treated as deploy-managed code. Local runtime behavior that should survive deploys belongs in `/etc/codex-ops/bot.env`, `STATE_DIR`, or project memory under `PROJECTS_DIR`.
+
+The bot can wake itself up from durable request files. This is the preferred mechanism for reminders, delayed follow-up, and host-side requests created by another agent:
+
+- `HOST_REQUEST_POLL_INTERVAL_MS` (default: `3600000`): interval for scanning host request queues. Set `0` to disable.
+- `HOST_REQUEST_STARTUP_DELAY_MS` (default: `30000`): startup delay before the first scan, so already-pending files are picked up soon after restart.
+- `HOST_REQUEST_DIR_NAMES` (default: `host-requests,staging-requests,scheduled-requests`): per-project queue directory names scanned under each `/srv/codex-ops/projects/<project>`.
+- `HOST_REQUEST_DIRS`: semicolon/comma/newline-separated extra absolute queue directories. Defaults include `$STATE_DIR/host-requests`, `$STATE_DIR/scheduled-requests`, and OpenClaw runtime mirror request directories under `/data/.openclaw/team-memory`.
+
+Each queue may contain Markdown, text, or JSON files directly in the queue directory or in its `pending/` subdirectory. Processed files are moved to `running/`, then `done/`; failures move to `failed/`.
+
+Markdown request example:
+
+```md
+---
+project: openclaw
+title: Check pending runtime request
+runAt: 2026-05-21T15:30:00+05:00
+---
+
+Check the pending OpenClaw host request and report what changed.
+```
+
+JSON request example:
+
+```json
+{
+  "project": "openclaw",
+  "runAt": "2026-05-21T15:30:00+05:00",
+  "question": "Check the pending OpenClaw host request and report what changed."
+}
+```
+
 ## Context memory tuning
 
 - `HISTORY_ITEMS` (default: `8`): number of recent user/assistant items kept per chat.

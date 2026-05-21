@@ -40,6 +40,16 @@ const CODEX_MODEL_CATALOG_TIMEOUT_MS = readOptionalNonNegativeMs('CODEX_MODEL_CA
 const CODEX_PROGRESS_INTERVAL_MS = readOptionalNonNegativeMs('CODEX_PROGRESS_INTERVAL_MS', 300000, { minPositive: 60000 });
 const CODEX_PROGRESS_MAX_CHARS = Math.max(500, Number(process.env.CODEX_PROGRESS_MAX_CHARS || '1800') || 1800);
 const CODEX_STOP_KILL_GRACE_MS = readOptionalNonNegativeMs('CODEX_STOP_KILL_GRACE_MS', 10000, { minPositive: 1000 });
+const HOST_REQUEST_POLL_INTERVAL_MS = readOptionalNonNegativeMs('HOST_REQUEST_POLL_INTERVAL_MS', 3600000, { minPositive: 60000 });
+const HOST_REQUEST_STARTUP_DELAY_MS = readOptionalNonNegativeMs('HOST_REQUEST_STARTUP_DELAY_MS', 30000, { minPositive: 1000 });
+const HOST_REQUEST_DIR_NAMES = readListEnv('HOST_REQUEST_DIR_NAMES', ['host-requests', 'staging-requests', 'scheduled-requests']);
+const HOST_REQUEST_EXTRA_DIRS = readListEnv('HOST_REQUEST_DIRS', [
+  path.join(STATE_DIR, 'host-requests'),
+  path.join(STATE_DIR, 'scheduled-requests'),
+  '/data/.openclaw/team-memory/host-requests',
+  '/data/.openclaw/team-memory/staging-requests',
+  '/data/.openclaw/team-memory/scheduled-requests',
+]);
 const TELEGRAM_IMAGE_MAX_BYTES = Math.max(1000000, Number(process.env.TELEGRAM_IMAGE_MAX_BYTES || '10000000') || 10000000);
 const PENDING_IMAGE_TTL_MS = readOptionalNonNegativeMs('PENDING_IMAGE_TTL_MS', 1800000, { minPositive: 60000 });
 const PENDING_IMAGE_MAX_ITEMS = Math.min(10, Math.max(1, Number(process.env.PENDING_IMAGE_MAX_ITEMS || '4') || 4));
@@ -63,6 +73,7 @@ let authFlow = null;
 const TELEGRAM_ALLOWED_UPDATES = ['message', 'edited_message', 'callback_query'];
 const voiceDrafts = new Map();
 const voiceSupplementByChat = new Map();
+let hostRequestPollRunning = false;
 
 function readOptionalNonNegativeMs(name, defaultValue, opts = {}) {
   const raw = process.env[name];
@@ -72,6 +83,12 @@ function readOptionalNonNegativeMs(name, defaultValue, opts = {}) {
   if (value === 0) return 0;
   const minPositive = Number(opts.minPositive) || 0;
   return Math.max(minPositive, value);
+}
+
+function readListEnv(name, defaults = []) {
+  const raw = process.env[name];
+  const items = raw == null || String(raw).trim() === '' ? defaults : String(raw).split(/[,\n;]/);
+  return items.map((item) => String(item || '').trim()).filter(Boolean);
 }
 
 function nowStamp() {
@@ -137,7 +154,13 @@ function activeTaskAge(task) {
 
 function activeTaskLabel(task) {
   if (!task) return 'none';
-  const kind = task.kind === 'diag' ? 'diagnostic' : task.kind === 'steer' ? 'steer resume' : 'Codex request';
+  const kind = task.kind === 'diag'
+    ? 'diagnostic'
+    : task.kind === 'steer'
+      ? 'steer resume'
+      : task.kind === 'host-request'
+        ? 'host request'
+        : 'Codex request';
   return `#${task.id} ${kind}`;
 }
 
@@ -324,10 +347,12 @@ function looksLikeCodexAuth401(text) {
       || value.includes('refresh_token_reused')
       || value.includes('Provided authentication token is expired')
       || value.includes('access token could not be refreshed')
+      || value.includes('Missing bearer or basic authentication')
     )
     && (
       value.includes('chatgpt.com/backend-api/codex/responses')
       || value.includes('chatgpt.com/backend-api/codex/models')
+      || value.includes('api.openai.com/v1/responses')
       || value.includes('Failed to refresh token')
       || value.includes('codex_login::auth::manager')
     )
@@ -965,15 +990,56 @@ function stripAnsi(text) {
   return String(text || '').replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '').replace(/\x1B\][^\x07]*(\x07|\x1B\\)/g, '');
 }
 
+function codexEnvArgs(args) {
+  return ['HOME=/var/lib/codexops', `CODEX_HOME=${CODEX_HOME}`, ...args];
+}
+
+function codexEnv() {
+  return { ...process.env, HOME: '/var/lib/codexops', CODEX_HOME };
+}
+
+function spawnCodexDeviceLogin() {
+  const opts = { stdio: ['ignore', 'pipe', 'pipe'], env: codexEnv() };
+  if (process.platform === 'win32') {
+    return spawn('codex', ['login', '--device-auth'], opts);
+  }
+  return spawn('bash', [
+    '-lc',
+    'if command -v script >/dev/null 2>&1; then exec script -q -e -c "codex login --device-auth" /dev/null; else exec codex login --device-auth; fi',
+  ], opts);
+}
+
+function normalizeDeviceAuthCode(code) {
+  const compact = String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (compact === 'AUTHORIZ' || compact === 'AUTHORIZE') return '';
+  if (compact.length === 8) return `${compact.slice(0, 4)}-${compact.slice(4)}`;
+  if (compact.length === 9) return compact;
+  return String(code || '').trim().toUpperCase();
+}
+
 function parseDeviceAuthDetails(text) {
   const clean = stripAnsi(text);
-  const urlMatch = clean.match(/https:\/\/auth\.openai\.com\/codex\/device/);
-  const codeMatch = clean.match(/\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/);
+  const urlMatch = clean.match(/https:\/\/(?:auth\.openai\.com|chatgpt\.com)\/[^\s<>"')]+/i);
+  const codePatterns = [
+    /(?:^|\n)\s*(?:one[-\s]?time\s+)?(?:verification\s+|user\s+)?code\s*[:=-]\s*([A-Z0-9]{4,5}[-\s]?[A-Z0-9]{4,5})\b/im,
+    /(?:^|\n).*?\b(?:enter|use|copy|paste)\b.*?\bcode\b[^A-Z0-9]{0,24}([A-Z0-9]{4,5}[-\s]?[A-Z0-9]{4,5})\b/im,
+  ];
+  let code = '';
+  for (const pattern of codePatterns) {
+    const match = clean.match(pattern);
+    code = normalizeDeviceAuthCode(match && match[1]);
+    if (code) break;
+  }
   return {
-    url: urlMatch ? urlMatch[0] : '',
-    code: codeMatch ? codeMatch[0] : '',
+    url: urlMatch ? urlMatch[0].replace(/[.,;:]+$/, '') : '',
+    code,
     clean,
   };
+}
+
+function outputTail(text, lineLimit = 10, charLimit = 1200) {
+  const tail = stripAnsi(text).split('\n').map((line) => line.trim()).filter(Boolean).slice(-lineLimit).join('\n');
+  return clip(tail || '(no output yet)', charLimit);
 }
 
 function lineStartsToolTranscript(line) {
@@ -1071,39 +1137,67 @@ function createCodexProgressReporter({ chatId, intervalMs = CODEX_PROGRESS_INTER
 }
 
 async function codexLoginStatus() {
-  const args = ['HOME=/var/lib/codexops', `CODEX_HOME=${CODEX_HOME}`, 'codex', 'login', 'status'];
-  return run('env', args, { timeoutMs: 30000 });
+  return run('env', codexEnvArgs(['codex', 'login', 'status']), { timeoutMs: 30000 });
 }
 
-async function startDeviceAuthFlow(chatId) {
+async function codexLogout() {
+  return run('env', codexEnvArgs(['codex', 'logout']), { timeoutMs: 30000 });
+}
+
+async function startDeviceAuthFlow(chatId, opts = {}) {
+  const refreshAuth = opts.refreshAuth !== false;
   if (authFlow) {
     await sendMessage(chatId, `Login flow is already in progress for chat ${authFlow.chatId}. Use /codex login cancel first if needed.`);
     return;
   }
 
   authFlow = { chatId, canceled: false, startedAt: Date.now(), child: null };
-  await sendMessage(chatId, 'Starting Codex device login. I will send the URL and one-time code.');
+  await sendMessage(chatId, refreshAuth
+    ? 'Starting Codex device login. I will refresh stored auth first, then send the URL and one-time code.'
+    : 'Starting Codex device login without refreshing stored auth. I will send the URL and one-time code.');
 
-  const args = ['HOME=/var/lib/codexops', `CODEX_HOME=${CODEX_HOME}`, 'codex', 'login', '--device-auth'];
-  const child = spawn('env', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const logout = refreshAuth ? await codexLogout() : null;
+  if (!authFlow || authFlow.canceled) return;
+
+  const child = spawnCodexDeviceLogin();
   authFlow.child = child;
 
   let combined = '';
+  const logoutOutput = logout ? [logout.stdout, logout.stderr].filter(Boolean).join('\n').trim() : '';
+  if (logoutOutput) combined += `[pre-login logout]\n${logoutOutput}\n`;
   let sentDeviceCode = false;
+  let sentUrlWithoutCode = false;
   let timeoutHit = false;
+  let sentNoCodeHint = false;
 
   const maybeSendDeviceCode = () => {
     if (sentDeviceCode || !authFlow || authFlow.canceled) return;
     const details = parseDeviceAuthDetails(combined);
-    if (!details.url || !details.code) return;
+    if (!details.url) return;
     sentDeviceCode = true;
-    void sendMessage(chatId, [
+    const lines = [
       'Codex login in progress.',
       `1) Open: ${details.url}`,
-      `2) Enter code: ${details.code}`,
       'After browser confirmation, I will report final status here.',
-    ].join('\n')).catch(() => {});
+    ];
+    if (details.code) lines.splice(2, 0, `2) Enter code: ${details.code}`);
+    if (!details.code) {
+      sentUrlWithoutCode = true;
+      lines.push('', 'No separate code was detected in Codex output. Recent output:', outputTail(combined));
+    }
+    void sendMessage(chatId, lines.join('\n')).catch(() => {});
   };
+
+  const noCodeHintTimer = setTimeout(() => {
+    if ((sentDeviceCode && !sentUrlWithoutCode) || sentNoCodeHint || !authFlow || authFlow.canceled) return;
+    sentNoCodeHint = true;
+    void sendMessage(chatId, [
+      sentUrlWithoutCode ? 'Codex login printed a device link but no code.' : 'Codex login has not printed a device link yet.',
+      'I am still waiting; recent output:',
+      outputTail(combined),
+    ].join('\n')).catch(() => {});
+  }, 15000);
+  if (typeof noCodeHintTimer.unref === 'function') noCodeHintTimer.unref();
 
   child.stdout.on('data', (chunk) => {
     combined += chunk.toString();
@@ -1126,6 +1220,7 @@ async function startDeviceAuthFlow(chatId) {
       child.on('error', (error) => resolve({ code: 1, signal: null, error }));
     });
     clearTimeout(timer);
+    clearTimeout(noCodeHintTimer);
 
     const current = authFlow;
     authFlow = null;
@@ -1136,17 +1231,19 @@ async function startDeviceAuthFlow(chatId) {
     await fs.mkdir(STATE_DIR, { recursive: true });
     await fs.writeFile(debugFile, combined || '(empty output)\n', 'utf8');
 
-    if (!sentDeviceCode && details.url && details.code) {
-      await sendMessage(chatId, [
+    if (!sentDeviceCode && details.url) {
+      const lines = [
         'Device auth details were captured late.',
         `Open: ${details.url}`,
-        `Code: ${details.code}`,
-      ].join('\n'));
+      ];
+      if (details.code) lines.push(`Code: ${details.code}`);
+      await sendMessage(chatId, lines.join('\n'));
     }
 
-    if (result.code === 0 && /Successfully logged in/i.test(stripAnsi(combined))) {
+    if (result.code === 0) {
       const status = await codexLoginStatus();
-      await sendMessage(chatId, `Codex login completed.\n${(status.stdout || status.stderr || '').trim() || 'Status check returned no output.'}`);
+      const statusBody = (status.stdout || status.stderr || '').trim() || 'Status check returned no output.';
+      await sendMessage(chatId, `Codex login command completed.\n${statusBody}`);
       return;
     }
 
@@ -1446,6 +1543,224 @@ async function listProjects() {
     return [];
   }
 }
+
+function firstAllowedChatId() {
+  for (const chatId of ALLOWED_CHAT_IDS) return chatId;
+  return '';
+}
+
+function uniqueItems(items) {
+  return [...new Set(items.filter(Boolean))];
+}
+
+function normalizeHostRequestMeta(meta = {}) {
+  const rawChatId = String(meta.chatId || meta.chat || '').trim();
+  const chatId = rawChatId && ALLOWED_CHAT_IDS.has(rawChatId) ? rawChatId : firstAllowedChatId();
+  const project = normalizeProjectName(meta.project || meta.repo || meta.workspace || DEFAULT_PROJECT) || DEFAULT_PROJECT;
+  const title = String(meta.title || meta.name || '').trim();
+  const runAtText = String(meta.runAt || meta.run_at || meta.dueAt || meta.due_at || meta.notBefore || meta.not_before || '').trim();
+  const runAt = runAtText ? Date.parse(runAtText) : 0;
+  return {
+    chatId,
+    project,
+    title,
+    runAt: Number.isFinite(runAt) ? runAt : 0,
+    runAtText,
+  };
+}
+
+function parseHostRequestFrontMatter(text) {
+  const value = String(text || '').replace(/^\uFEFF/, '');
+  if (!value.startsWith('---')) return { meta: {}, body: value };
+  const end = value.indexOf('\n---', 3);
+  if (end < 0) return { meta: {}, body: value };
+  const header = value.slice(3, end).trim();
+  const body = value.slice(value.indexOf('\n', end + 1) + 1);
+  const meta = {};
+  for (const line of header.split(/\r?\n/)) {
+    const match = line.match(/^\s*([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*?)\s*$/);
+    if (!match) continue;
+    meta[match[1]] = match[2].replace(/^['"]|['"]$/g, '');
+  }
+  return { meta, body };
+}
+
+function parseHostRequestFileContent(file, text, fallbackProject = DEFAULT_PROJECT) {
+  const ext = path.extname(file).toLowerCase();
+  if (ext === '.json') {
+    const data = JSON.parse(text);
+    const meta = normalizeHostRequestMeta({ ...data, project: data.project || fallbackProject });
+    const question = String(data.question || data.prompt || data.text || data.body || '').trim();
+    return { ...meta, question };
+  }
+  const parsed = parseHostRequestFrontMatter(text);
+  const meta = normalizeHostRequestMeta({ ...parsed.meta, project: parsed.meta.project || fallbackProject });
+  const question = parsed.body.trim() || text.trim();
+  return { ...meta, question };
+}
+
+async function directoryExists(dir) {
+  try {
+    const stat = await fs.stat(dir);
+    return stat.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+async function collectHostRequestSources() {
+  const sources = [];
+  for (const dir of HOST_REQUEST_EXTRA_DIRS) {
+    sources.push({ dir, fallbackProject: DEFAULT_PROJECT });
+  }
+  for (const project of await listProjects()) {
+    for (const name of HOST_REQUEST_DIR_NAMES) {
+      sources.push({ dir: path.join(PROJECTS_DIR, project, name), fallbackProject: project });
+    }
+  }
+  const seen = new Set();
+  return sources.filter((source) => {
+    const key = path.resolve(source.dir);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function listHostRequestFilesInDir(dir, queueRoot, fallbackProject) {
+  let entries = [];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((entry) => entry.isFile() && ['.md', '.txt', '.json'].includes(path.extname(entry.name).toLowerCase()))
+    .map((entry) => ({
+      file: path.join(dir, entry.name),
+      name: entry.name,
+      queueRoot,
+      fallbackProject,
+    }));
+}
+
+async function collectHostRequestFiles() {
+  const files = [];
+  for (const source of await collectHostRequestSources()) {
+    if (!await directoryExists(source.dir)) continue;
+    const pendingDir = path.join(source.dir, 'pending');
+    if (await directoryExists(pendingDir)) {
+      files.push(...await listHostRequestFilesInDir(pendingDir, source.dir, source.fallbackProject));
+    }
+    files.push(...await listHostRequestFilesInDir(source.dir, source.dir, source.fallbackProject));
+  }
+  const seen = new Set();
+  return files
+    .filter((item) => {
+      const key = path.resolve(item.file);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => a.file.localeCompare(b.file));
+}
+
+async function moveHostRequestFile(item, status) {
+  const targetDir = path.join(item.queueRoot, status);
+  await fs.mkdir(targetDir, { recursive: true });
+  const parsed = path.parse(item.name);
+  let target = path.join(targetDir, item.name);
+  if (await fileExists(target)) {
+    target = path.join(targetDir, `${parsed.name}-${nowStamp()}-${randomUUID().slice(0, 8)}${parsed.ext}`);
+  }
+  await fs.rename(item.file, target);
+  return target;
+}
+
+async function enqueueProjectCodexRequest(chatId, project, question, source = {}) {
+  const safeProject = normalizeProjectName(project) || DEFAULT_PROJECT;
+  await ensureProjectFiles(safeProject);
+  const taskKind = source.kind || 'host-request';
+  if (activeTask || taskQueue.length) {
+    const queued = createQueuedTask({ chatId, kind: taskKind, project: safeProject, question, images: [], sourceMessageId: null });
+    taskQueue.push(queued);
+    await sendQueuedTaskMessage(chatId, queued);
+    if (!activeTask) startNextQueuedTask();
+    return queued;
+  }
+  const task = createActiveTask({ chatId, kind: taskKind, project: safeProject, question, images: [], sourceMessageId: null });
+  startCodexTask(task);
+  return task;
+}
+
+async function processHostRequestFile(item) {
+  const text = await fs.readFile(item.file, 'utf8');
+  const request = parseHostRequestFileContent(item.file, text, item.fallbackProject);
+  if (!request.chatId) throw new Error('No allowed Telegram chat is configured for host request notifications.');
+  if (!request.question) throw new Error('Host request file has no question/body.');
+  if (request.runAt && request.runAt > Date.now()) return false;
+  const runningFile = await moveHostRequestFile(item, 'running');
+  const title = request.title ? `${request.title}\n` : '';
+  await sendMessage(request.chatId, [
+    'Host request picked up.',
+    `Project: ${request.project}`,
+    `${title}Source: ${runningFile}`,
+  ].filter(Boolean).join('\n'));
+  await enqueueProjectCodexRequest(request.chatId, request.project, request.question, { kind: 'host-request' });
+  await moveHostRequestFile({ ...item, file: runningFile, name: path.basename(runningFile) }, 'done');
+  return true;
+}
+
+async function pollHostRequests(reason = 'interval') {
+  if (hostRequestPollRunning) return;
+  hostRequestPollRunning = true;
+  try {
+    const files = await collectHostRequestFiles();
+    let processed = 0;
+    for (const item of files) {
+      try {
+        if (await processHostRequestFile(item)) processed += 1;
+      } catch (error) {
+        console.error(`[host-request-error] file=${item.file} error=${error && (error.stack || error.message)}`);
+        try {
+          await moveHostRequestFile(item, 'failed');
+        } catch {}
+        const chatId = firstAllowedChatId();
+        if (chatId) {
+          await sendMessage(chatId, `Host request failed: ${path.basename(item.file)}\n${error.message || String(error)}`).catch(() => {});
+        }
+      }
+    }
+    if (processed > 0) console.warn(`[host-request-poll] reason=${reason} processed=${processed}`);
+  } finally {
+    hostRequestPollRunning = false;
+  }
+}
+
+async function ensureHostRequestQueueDirs() {
+  for (const dir of uniqueItems([
+    path.join(STATE_DIR, 'host-requests'),
+    path.join(STATE_DIR, 'scheduled-requests'),
+  ])) {
+    await fs.mkdir(path.join(dir, 'pending'), { recursive: true });
+    await fs.mkdir(path.join(dir, 'running'), { recursive: true });
+    await fs.mkdir(path.join(dir, 'done'), { recursive: true });
+    await fs.mkdir(path.join(dir, 'failed'), { recursive: true });
+  }
+}
+
+function startHostRequestPoller() {
+  if (HOST_REQUEST_POLL_INTERVAL_MS <= 0) return;
+  const startupTimer = setTimeout(() => {
+    void pollHostRequests('startup').catch((error) => console.error(`[host-request-poll-startup-error] ${error && (error.stack || error.message)}`));
+  }, HOST_REQUEST_STARTUP_DELAY_MS);
+  if (typeof startupTimer.unref === 'function') startupTimer.unref();
+  const interval = setInterval(() => {
+    void pollHostRequests('interval').catch((error) => console.error(`[host-request-poll-interval-error] ${error && (error.stack || error.message)}`));
+  }, HOST_REQUEST_POLL_INTERVAL_MS);
+  if (typeof interval.unref === 'function') interval.unref();
+}
+
 function defaultProjectContext(project) {
   if (project === 'openclaw') {
     return `# OpenClaw Project Context
@@ -1643,6 +1958,108 @@ function formatRepositoryWarnings(repository) {
   return warnings.length ? warnings.join('\n') : '';
 }
 
+function projectDeployKeyPaths(project) {
+  const safe = normalizeProjectName(project);
+  if (!safe) throw new Error('Project name is invalid.');
+  const dir = path.join(STATE_DIR, 'project-ssh-keys', safe);
+  const privateKey = path.join(dir, 'id_ed25519');
+  return { dir, privateKey, publicKey: `${privateKey}.pub` };
+}
+
+function sanitizeSshKeyComment(value) {
+  return String(value || '').replace(/[^A-Za-z0-9_.@-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'codex-ops-project';
+}
+
+async function ensureProjectDeployKey(project) {
+  const safe = normalizeProjectName(project);
+  if (!safe) throw new Error('Project name is invalid.');
+  const keys = projectDeployKeyPaths(safe);
+  await fs.mkdir(keys.dir, { recursive: true });
+  const hasPrivateKey = await fileExists(keys.privateKey);
+  const hasPublicKey = await fileExists(keys.publicKey);
+  if (!hasPrivateKey) {
+    const comment = sanitizeSshKeyComment(`codex-ops-${safe}-${HOST_LABEL}`);
+    const result = await run('ssh-keygen', ['-t', 'ed25519', '-C', comment, '-N', '', '-f', keys.privateKey], { timeoutMs: 30000 });
+    if (result.code !== 0) {
+      const details = (result.stderr || result.stdout || 'ssh-keygen failed').trim();
+      throw new Error(`Could not create project deploy key: ${details}`);
+    }
+  } else if (!hasPublicKey) {
+    const result = await run('ssh-keygen', ['-y', '-f', keys.privateKey], { timeoutMs: 30000 });
+    if (result.code !== 0 || !String(result.stdout || '').trim()) {
+      const details = (result.stderr || result.stdout || 'ssh-keygen -y failed').trim();
+      throw new Error(`Could not derive project deploy public key: ${details}`);
+    }
+    await fs.writeFile(keys.publicKey, `${String(result.stdout).trim()}\n`, 'utf8');
+  }
+  try {
+    await fs.chmod(keys.privateKey, 0o600);
+    await fs.chmod(keys.publicKey, 0o644);
+  } catch {}
+  const publicKey = (await fs.readFile(keys.publicKey, 'utf8')).trim();
+  const fingerprintResult = await run('ssh-keygen', ['-lf', keys.publicKey], { timeoutMs: 15000 });
+  const fingerprint = fingerprintResult.code === 0 ? String(fingerprintResult.stdout || '').trim() : '';
+  return { ...keys, publicKeyText: publicKey, fingerprint };
+}
+
+function projectSshCommand(privateKey) {
+  return `ssh -i ${privateKey} -o IdentitiesOnly=yes`;
+}
+
+async function applyProjectSshCommand(repo, keyInfo = null) {
+  const info = keyInfo || await ensureProjectDeployKey(path.basename(repo));
+  const result = await run('git', ['-C', repo, 'config', 'core.sshCommand', projectSshCommand(info.privateKey)], { timeoutMs: 15000 });
+  if (result.code !== 0) {
+    const details = (result.stderr || result.stdout || 'git config failed').trim();
+    throw new Error(`Could not configure project ssh command: ${details}`);
+  }
+}
+
+function looksLikeGitRemoteUrl(value) {
+  const text = String(value || '').trim();
+  return /^(git@|ssh:\/\/|https:\/\/).+/.test(text);
+}
+
+async function setProjectGitRemote(project, remoteUrl) {
+  const safe = normalizeProjectName(project);
+  if (!safe) throw new Error('Project name is invalid.');
+  const url = String(remoteUrl || '').trim();
+  if (!looksLikeGitRemoteUrl(url)) throw new Error('Remote URL should start with git@, ssh://, or https://.');
+  const paths = await ensureProjectFiles(safe);
+  const keyInfo = await ensureProjectDeployKey(safe);
+  const remotes = await gitRemoteNames(paths.repo);
+  const args = remotes.includes('origin')
+    ? ['-C', paths.repo, 'remote', 'set-url', 'origin', url]
+    : ['-C', paths.repo, 'remote', 'add', 'origin', url];
+  const result = await run('git', args, { timeoutMs: 30000 });
+  if (result.code !== 0) {
+    const details = (result.stderr || result.stdout || 'git remote failed').trim();
+    throw new Error(`Could not configure project remote: ${details}`);
+  }
+  await applyProjectSshCommand(paths.repo, keyInfo);
+  return { paths, keyInfo, remoteUrl: url };
+}
+
+async function renderProjectRemote(project) {
+  const safe = normalizeProjectName(project);
+  if (!safe) throw new Error('Project name is invalid.');
+  const paths = await ensureProjectFiles(safe);
+  const remoteResult = await run('git', ['-C', paths.repo, 'remote', '-v'], { timeoutMs: 15000 });
+  const remoteText = remoteResult.code === 0 && String(remoteResult.stdout || '').trim() ? String(remoteResult.stdout).trim() : '(none)';
+  const keyExists = await fileExists(projectDeployKeyPaths(safe).publicKey);
+  return [
+    `Project: ${safe}`,
+    `Repository: ${paths.repo}`,
+    `Remotes:\n${remoteText}`,
+    `Project deploy key: ${keyExists ? 'created' : 'not created'}`,
+    '',
+    'Flow:',
+    '1) /project key',
+    '2) add the public key to the Git provider as a write deploy key',
+    '3) /project remote git@github.com:OWNER/REPO.git',
+  ].join('\n');
+}
+
 async function gitStatusPorcelain(dir) {
   const result = await run('git', ['-C', dir, 'status', '--porcelain=v1'], { timeoutMs: 30000 });
   if (result.code !== 0) {
@@ -1690,17 +2107,32 @@ async function autoCommitProjectRepository(project, question = '') {
   }
 
   const rev = await run('git', ['-C', paths.repo, 'rev-parse', '--short', 'HEAD'], { timeoutMs: 30000 });
+  const updatedRemotes = await gitRemoteNames(paths.repo);
+  let push = { attempted: false, ok: false, error: '' };
+  if (updatedRemotes.includes('origin')) {
+    push = { attempted: true, ok: false, error: '' };
+    const pushResult = await run('git', ['-C', paths.repo, 'push', '-u', 'origin', 'HEAD'], { timeoutMs: 120000 });
+    if (pushResult.code === 0) {
+      push.ok = true;
+    } else {
+      push.error = clip((pushResult.stderr || pushResult.stdout || 'git push failed').trim(), 1200);
+    }
+  }
   return {
     committed: true,
     hash: rev.code === 0 ? String(rev.stdout || '').trim() : '',
     path: paths.repo,
     warnings: paths.repository.warnings,
+    push,
   };
 }
 
 function formatAutoCommitNote(result) {
   if (!result || !result.committed) return '';
-  return `Auto-commit before report: ${result.hash || 'created'} in ${result.path}`;
+  const lines = [`Auto-commit before report: ${result.hash || 'created'} in ${result.path}`];
+  if (result.push && result.push.attempted && result.push.ok) lines.push('Auto-push: pushed to origin.');
+  if (result.push && result.push.attempted && !result.push.ok) lines.push(`Auto-push failed: ${result.push.error || 'unknown error'}`);
+  return lines.join('\n');
 }
 
 function defaultProjectChangelog(project) {
@@ -1973,6 +2405,9 @@ async function buildQuestionPrompt(question, options = {}) {
     'Use the active project NOTES.md as durable project memory for facts, pitfalls, pending work, and decisions that should survive beyond recent chat history.',
     'If the user asks to create or update changelog, write to the active project CHANGELOG.md unless the user explicitly gives another path.',
     `Do not create changelog files inside ${INCIDENTS_DIR}.`,
+    'Treat /opt/codex-ops as deploy-managed application code. Do not edit /opt/codex-ops/bot.mjs just to create reminders, polling jobs, or local runtime preferences.',
+    `For self-reminders or autonomous follow-up work, create a Markdown or JSON request file under ${path.join(STATE_DIR, 'scheduled-requests', 'pending')} or an active project host-requests/pending directory. The bot polls these durable queues and dispatches due requests.`,
+    'Request file metadata may include project, chatId, title, and runAt ISO timestamp in Markdown front matter or JSON fields. Put the actual Codex instruction in the body/question field.',
     `Respond in ${ASSISTANT_LANGUAGE}.`,
     'Do the necessary investigation yourself before answering when the question requires checking the server.',
     'Use concise final-answer style only. Do not provide chain-of-thought, hidden reasoning, or long reflective narration.',
@@ -2528,13 +2963,15 @@ function startNextQueuedTask() {
 async function sendQueuedTaskMessage(chatId, task) {
   const position = queuedTaskPosition(task);
   const imageLine = task.images && task.images.length ? `\nImages: ${task.images.length}` : '';
-  await sendMessage(chatId, [
+  const lines = [
     `Queued ${activeTaskLabel(task)} at position ${position}.`,
     `Project: ${task.project}${imageLine}`,
     `Request: ${clip(task.question, 700)}`,
-    '',
-    'Edit the original Telegram message before it starts to update this queued request.',
-  ].join('\n'));
+  ];
+  if (task.sourceMessageId) {
+    lines.push('', 'Edit the original Telegram message before it starts to update this queued request.');
+  }
+  await sendMessage(chatId, lines.join('\n'));
 }
 
 function startSteerCodexRequest(chatId, steerText, previousTask) {
@@ -2835,6 +3272,9 @@ async function handle(chatId, text, source = {}) {
       '/projects',
       '/project <name>',
       '/project new <name>',
+      '/project key',
+      '/project remote',
+      '/project remote <git-url>',
       '/context show',
       '/session reset',
       '/codex task',
@@ -2846,6 +3286,7 @@ async function handle(chatId, text, source = {}) {
       '/codex reasoning',
       '/codex reasoning <effort|default>',
       '/codex login',
+      '/codex login keep',
       '/codex login status',
       '/codex login cancel',
     ].join('\n'));
@@ -2905,6 +3346,14 @@ async function handle(chatId, text, source = {}) {
     await startDeviceAuthFlow(chatId);
     return;
   }
+  if (trimmed === '/codex login refresh') {
+    await startDeviceAuthFlow(chatId);
+    return;
+  }
+  if (trimmed === '/codex login keep') {
+    await startDeviceAuthFlow(chatId, { refreshAuth: false });
+    return;
+  }
   if (trimmed === '/codex login cancel') {
     await cancelDeviceAuthFlow(chatId);
     return;
@@ -2931,11 +3380,45 @@ async function handle(chatId, text, source = {}) {
     const arg = trimmed.replace(/^\/project\s*/, '');
     const current = await getChatState(chatId);
     if (!arg || arg === '/project') {
-      await sendMessage(chatId, `Current project: ${current.project}\nUsage: /project <name> or /project new <name>`);
+      await sendMessage(chatId, `Current project: ${current.project}\nUsage: /project <name>, /project new <name>, /project key, /project remote, or /project remote <git-url>`);
       return;
     }
     if (hasActiveOrQueuedTaskForChat(chatId)) {
       await sendMessage(chatId, 'Wait for the active and queued tasks to finish, or use /codex stop for the active task before switching projects.');
+      return;
+    }
+    if (arg === 'key' || arg === 'ssh-key') {
+      const keyInfo = await ensureProjectDeployKey(current.project);
+      const body = [
+        `Project deploy key for ${current.project}`,
+        '',
+        'Add this public key to the Git provider as a deploy key with write access:',
+        '',
+        keyInfo.publicKeyText,
+        '',
+        keyInfo.fingerprint ? `Fingerprint: ${keyInfo.fingerprint}` : '',
+        '',
+        'Then run:',
+        `/project remote git@github.com:OWNER/REPO.git`,
+      ].filter(Boolean).join('\n');
+      await sendMessage(chatId, body);
+      return;
+    }
+    if (arg === 'remote' || arg === 'remote show') {
+      await sendMessage(chatId, await renderProjectRemote(current.project));
+      return;
+    }
+    if (arg.startsWith('remote ')) {
+      const remoteUrl = arg.slice('remote '.length).replace(/^set\s+/, '').trim();
+      const result = await setProjectGitRemote(current.project, remoteUrl);
+      await sendMessage(chatId, [
+        `Project remote configured for ${current.project}.`,
+        `Repository: ${result.paths.repo}`,
+        `origin: ${result.remoteUrl}`,
+        `SSH key: ${result.keyInfo.publicKey}`,
+        '',
+        'If the public key has already been added with write access, future local commits can be pushed.',
+      ].join('\n'));
       return;
     }
     if (arg.startsWith('new ')) {
@@ -3069,9 +3552,11 @@ async function main() {
   await fs.mkdir(STATE_DIR, { recursive: true });
   await fs.mkdir(UPLOADS_DIR, { recursive: true });
   await fs.mkdir(PROJECTS_DIR, { recursive: true });
+  await ensureHostRequestQueueDirs();
   await ensureProjectFiles('openclaw');
   await ensureProjectFiles('server');
   await initializeOffset();
+  startHostRequestPoller();
   await poll();
 }
 

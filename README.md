@@ -44,7 +44,9 @@ The goal is not to replace SSH completely. The goal is to make the common loop f
 - Persistent lightweight chat state and project-aware context
 - Out-of-the-box project memory files (`CHANGELOG.md`, `NOTES.md`, context, and runbooks)
 - Per-project git repositories rooted at `/srv/codex-ops/projects/<project>`
-- Automatic local git snapshot commits before final Telegram reports when project repository files changed
+- Automatic local git snapshot commits, with auto-push when `origin` is configured, before final Telegram reports
+- Telegram project remote setup flow with generated deploy keys
+- Durable host/scheduled request queues for autonomous follow-up work outside deploy-managed code
 - OpenClaw-focused diagnostics and incident note generation
 - Telegram image input for Codex vision-capable investigations
 - Telegram voice input with transcript review, implementation confirmation, supplements, and cancel
@@ -124,6 +126,9 @@ sudo systemctl status --no-pager codex-telegram-bot.service
 - `/projects`
 - `/project <name>`
 - `/project new <name>`
+- `/project key`
+- `/project remote`
+- `/project remote <git-url>`
 - `/context show`
 - `/session reset`
 - `/codex task`
@@ -135,6 +140,7 @@ sudo systemctl status --no-pager codex-telegram-bot.service
 - `/codex reasoning`
 - `/codex reasoning <effort|default>`
 - `/codex login`
+- `/codex login keep`
 - `/codex login status`
 - `/codex login cancel`
 

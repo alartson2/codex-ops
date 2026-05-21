@@ -49,6 +49,7 @@ sudo /opt/codex-ops/scripts/codex-auth.sh logout
 Or from Telegram:
 
 - `/codex login`
+- `/codex login keep`
 - `/codex login status`
 - `/codex login cancel`
 

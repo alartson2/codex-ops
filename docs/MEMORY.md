@@ -12,13 +12,29 @@ On bootstrap and bot startup, these files and directories are created for each p
 - `/srv/codex-ops/projects/<project>/CHANGELOG.md`: project-specific chronological memory for completed changes and planned-but-not-done work.
 - `/srv/codex-ops/projects/<project>/NOTES.md`: project-specific durable notes, pitfalls, pending work, and decisions.
 
-The default projects are `openclaw` and `server`. New projects created with `/project new <name>` get their own `repo`, `CONTEXT.md`, `RUNBOOK.md`, `CHANGELOG.md`, and `NOTES.md`.
+The default projects are `openclaw` and `server`. New projects created with `/project new <name>` get their own git repository, `CONTEXT.md`, `RUNBOOK.md`, `CHANGELOG.md`, and `NOTES.md`.
 
-If an older project directory does not have `repo` yet, the bot creates it automatically the next time that project is ensured, switched to, shown in context, or used for a Codex request. Repositories start without a git remote; until a remote is configured, Codex can commit locally but has nowhere to push.
+If an older project directory is not a git repository yet, the bot runs `git init` automatically the next time that project is ensured, switched to, shown in context, or used for a Codex request. Repositories start without a git remote; until a remote is configured, Codex can commit locally but has nowhere to push.
 
-Before sending a final Telegram report for a regular Codex request or steer resume, the bot checks the active project repository. If files changed, it stages all repository changes and creates a local snapshot commit. The report includes the commit hash when a snapshot was created. This is local-only unless the project repository has a remote and someone pushes it.
+Use `/project key` to generate and display a project deploy public key. Add that public key to the Git provider with write access, then run `/project remote <git-url>` to set `origin` and configure the repository to use the generated private key for SSH pushes. The private key stays under bot state and is never sent to Telegram.
+
+Before sending a final Telegram report for a regular Codex request or steer resume, the bot checks the active project repository. If files changed, it stages all repository changes and creates a local snapshot commit. If `origin` is configured, the bot then tries to push the snapshot. The report includes the commit hash and push result when a snapshot was created.
 
 The host-level files `/srv/codex-ops/OPS_CONTEXT.md` and `/srv/codex-ops/RUNBOOK_OPENCLAW.md` are still used for broad operational context, but project history belongs in project memory.
+
+## Durable host requests and reminders
+
+Deploys replace `/opt/codex-ops` from the repository, so self-modifying runtime behavior should not be stored by editing the live `bot.mjs`. Use durable queues instead:
+
+- `/var/lib/codexops/state/host-requests/pending`
+- `/var/lib/codexops/state/scheduled-requests/pending`
+- `/srv/codex-ops/projects/<project>/host-requests/pending`
+- `/srv/codex-ops/projects/<project>/staging-requests/pending`
+- `/srv/codex-ops/projects/<project>/scheduled-requests/pending`
+
+The bot scans these directories, plus extra paths configured by `HOST_REQUEST_DIRS`. A request file can be Markdown, text, or JSON. Markdown front matter or JSON fields may set `project`, `chatId`, `title`, and `runAt`. If `runAt` is in the future, the file stays pending until a later scan.
+
+Use these queues for delayed follow-up and autonomous checks. Use source changes plus deploy for permanent bot behavior changes.
 
 ## How Codex sees the memory
 
