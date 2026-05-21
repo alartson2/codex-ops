@@ -41,6 +41,7 @@ The goal is not to replace SSH completely. The goal is to make the common loop f
 - Native subscription device auth flow (`/codex login`)
 - Persistent lightweight chat state and project-aware context
 - Out-of-the-box project memory files (`CHANGELOG.md`, `NOTES.md`, context, and runbooks)
+- Per-project git repositories under `/srv/codex-ops/projects/<project>/repo`
 - OpenClaw-focused diagnostics and incident note generation
 - Telegram image input for Codex vision-capable investigations
 - Telegram voice input with transcript review, implementation confirmation, supplements, and cancel

@@ -1400,6 +1400,7 @@ function projectPaths(project) {
   const dir = path.join(PROJECTS_DIR, safe);
   return {
     dir,
+    repo: path.join(dir, 'repo'),
     context: path.join(dir, 'CONTEXT.md'),
     runbook: path.join(dir, 'RUNBOOK.md'),
     changelog: path.join(dir, 'CHANGELOG.md'),
@@ -1547,6 +1548,41 @@ async function ensureFile(file, text) {
   if (!(await fileExists(file))) await fs.writeFile(file, `${text.trim()}\n`, 'utf8');
 }
 
+async function isGitRepository(dir) {
+  const result = await run('git', ['-C', dir, 'rev-parse', '--is-inside-work-tree'], { timeoutMs: 15000 });
+  return result.code === 0 && String(result.stdout || '').trim() === 'true';
+}
+
+async function gitRemoteNames(dir) {
+  const result = await run('git', ['-C', dir, 'remote'], { timeoutMs: 15000 });
+  if (result.code !== 0) return [];
+  return String(result.stdout || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+async function ensureProjectRepository(project, paths = projectPaths(project)) {
+  await fs.mkdir(paths.repo, { recursive: true });
+  const warnings = [];
+  let created = false;
+  if (!(await isGitRepository(paths.repo))) {
+    const result = await run('git', ['-C', paths.repo, 'init'], { timeoutMs: 30000 });
+    if (result.code !== 0) {
+      const details = (result.stderr || result.stdout || 'git init failed').trim();
+      throw new Error(`Could not initialize project repository at ${paths.repo}: ${details}`);
+    }
+    created = true;
+  }
+  const remotes = await gitRemoteNames(paths.repo);
+  if (!remotes.length) {
+    warnings.push(`Warning: project repository has no git remote yet, so there is nowhere to push. Repository: ${paths.repo}`);
+  }
+  return { path: paths.repo, created, remotes, warnings };
+}
+
+function formatRepositoryWarnings(repository) {
+  const warnings = repository && Array.isArray(repository.warnings) ? repository.warnings : [];
+  return warnings.length ? warnings.join('\n') : '';
+}
+
 function defaultProjectChangelog(project) {
   return `# ${project} Changelog
 
@@ -1569,11 +1605,12 @@ async function ensureProjectFiles(project) {
   if (!safe) throw new Error('Project name is invalid.');
   const paths = projectPaths(safe);
   await fs.mkdir(paths.dir, { recursive: true });
+  const repository = await ensureProjectRepository(safe, paths);
   await ensureFile(paths.context, defaultProjectContext(safe));
   await ensureFile(paths.runbook, defaultProjectRunbook(safe));
   await ensureFile(paths.changelog, defaultProjectChangelog(safe));
   await ensureFile(paths.notes, defaultProjectNotes(safe));
-  return paths;
+  return { ...paths, repository };
 }
 
 async function collectStatus() {
@@ -1623,6 +1660,9 @@ async function collectOpenClawDiag(options = {}) {
 async function runCodex(prompt, options = {}) {
   const outFile = path.join(STATE_DIR, `codex-${nowStamp()}.txt`);
   await fs.mkdir(STATE_DIR, { recursive: true });
+  const project = normalizeProjectName(options.project || '');
+  const projectSetup = project ? await ensureProjectFiles(project) : null;
+  const codexCwd = projectSetup && projectSetup.repo ? projectSetup.repo : CODEX_CWD;
   const images = Array.isArray(options.images) ? options.images.map(normalizePendingImage).filter(Boolean) : [];
   const imageArgs = images.flatMap((image) => ['--image', image.path]);
   const chatState = options.chatId == null ? null : await getChatState(options.chatId);
@@ -1632,7 +1672,7 @@ async function runCodex(prompt, options = {}) {
   const reasoningArgs = selectedReasoning ? ['-c', `reasoning_effort=${quoteTomlString(selectedReasoning)}`] : [];
   const args = options.resumeLast
     ? ['HOME=/var/lib/codexops', `CODEX_HOME=${CODEX_HOME}`, 'codex', 'exec', 'resume', '--last', '--all', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '-o', outFile, ...modelArgs, ...reasoningArgs, ...imageArgs, '-']
-    : ['HOME=/var/lib/codexops', `CODEX_HOME=${CODEX_HOME}`, 'codex', 'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--color', 'never', '-C', CODEX_CWD, '-o', outFile, ...modelArgs, ...reasoningArgs, ...imageArgs, '-'];
+    : ['HOME=/var/lib/codexops', `CODEX_HOME=${CODEX_HOME}`, 'codex', 'exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--color', 'never', '-C', codexCwd, '-o', outFile, ...modelArgs, ...reasoningArgs, ...imageArgs, '-'];
   const progress = createCodexProgressReporter({ chatId: options.chatId });
   const result = await run('env', args, {
     input: prompt,
@@ -1760,7 +1800,7 @@ function contextPressureForTokens(tokens) {
 async function buildQuestionPrompt(question, options = {}) {
   const chatState = options.chatId == null ? emptyChatState(DEFAULT_PROJECT) : await getChatState(options.chatId);
   const activeProject = normalizeProjectName(options.project || chatState.project) || DEFAULT_PROJECT;
-  const paths = projectPaths(activeProject);
+  const paths = await ensureProjectFiles(activeProject);
   const attachmentsText = formatImageList(options.images || options.attachments || []);
   const opsContext = await readMaybe(OPS_CONTEXT_FILE, 25000);
   const globalRunbook = await readMaybe(RUNBOOK_FILE, 12000);
@@ -1771,6 +1811,12 @@ async function buildQuestionPrompt(question, options = {}) {
   const historyText = options.disableHistory ? '(disabled for this request)' : formatHistory(chatState.history);
   const historical = activeProject === 'openclaw' ? await latestIncident('openclaw') : await latestIncident(activeProject);
   const historicalText = historical ? `${historical.name}\n\n${compactIncidentForPrompt(historical.text)}` : '';
+  const repositoryText = [
+    `Path: ${paths.repo}`,
+    `Initialized during this request: ${paths.repository && paths.repository.created ? 'yes' : 'no'}`,
+    `Git remotes: ${paths.repository && paths.repository.remotes && paths.repository.remotes.length ? paths.repository.remotes.join(', ') : '(none)'}`,
+    formatRepositoryWarnings(paths.repository) || '(no warnings)',
+  ].join('\n');
   const promptContextChars = [
     opsContext,
     globalRunbook,
@@ -1780,6 +1826,7 @@ async function buildQuestionPrompt(question, options = {}) {
     projectNotes,
     historyText,
     historicalText,
+    repositoryText,
     attachmentsText,
     question,
   ].join('\n').length;
@@ -1791,6 +1838,8 @@ async function buildQuestionPrompt(question, options = {}) {
     'Secondary mission: broader server setup and diagnostics.',
     `Active project for this chat: ${activeProject}.`,
     'Respect the active project first. Only widen scope when the user clearly asks for another system or the evidence requires it.',
+    `Active project repository path: ${paths.repo}. Use it as the default workspace for project-local files and git operations.`,
+    'If the active project repository has no git remote, do not claim that changes were pushed. Mention that there is nowhere to push unless a remote is configured.',
     'When the request, target project, repository, environment, or intended change is ambiguous, pause before making changes. Ask one concise clarifying question, or send a short implementation plan and wait for explicit operator confirmation instead of guessing.',
     'If read-only investigation is needed to resolve ambiguity, do that first; if uncertainty remains before edits, deployments, restarts, or other state-changing actions, stop with the plan/question rather than continuing for a long time.',
     `Active project changelog file: ${paths.changelog}.`,
@@ -1848,6 +1897,10 @@ async function buildQuestionPrompt(question, options = {}) {
     historicalText,
     '</historical_incident>',
     '',
+    '<active_project_repository>',
+    repositoryText,
+    '</active_project_repository>',
+    '',
     '<telegram_image_attachments>',
     attachmentsText,
     '</telegram_image_attachments>',
@@ -1861,7 +1914,7 @@ async function buildQuestionPrompt(question, options = {}) {
 async function renderContext(chatId) {
   const chatState = await getChatState(chatId);
   const projects = await listProjects();
-  const paths = projectPaths(chatState.project);
+  const paths = await ensureProjectFiles(chatState.project);
   const defaults = await readCodexConfigDefaults();
   const settings = effectiveCodexSettings(chatState, defaults);
   return [
@@ -1871,6 +1924,8 @@ async function renderContext(chatId) {
     `Codex reasoning: ${settings.reasoningEffort || '(Codex default)'}${settings.reasoningOverride ? ' (Telegram override)' : ' (config/default)'}`,
     `History items kept: ${chatState.history.length}/${HISTORY_ITEMS}`,
     `Pending images: ${chatState.pendingImages.length}/${PENDING_IMAGE_MAX_ITEMS}`,
+    `Project repository: ${paths.repo}`,
+    `Project repository remotes: ${paths.repository.remotes.length ? paths.repository.remotes.join(', ') : '(none)'}`,
     `Project context: ${await fileExists(paths.context) ? paths.context : '(missing)'}`,
     `Project runbook: ${await fileExists(paths.runbook) ? paths.runbook : '(missing)'}`,
     `Project changelog: ${await fileExists(paths.changelog) ? paths.changelog : '(missing)'}`,
@@ -2070,8 +2125,10 @@ async function handleProjectSwitch(chatId, project) {
   const requested = normalizeProjectName(project);
   const projects = await listProjects();
   if (!projects.includes(requested)) throw new Error(`Project ${requested} does not exist.`);
-  await ensureProjectFiles(requested);
+  const paths = await ensureProjectFiles(requested);
   await setChatState(chatId, { project: requested, history: [] });
+  const warnings = formatRepositoryWarnings(paths.repository);
+  if (warnings) await sendMessage(chatId, warnings);
   return requested;
 }
 
@@ -2238,13 +2295,16 @@ async function finalizeActiveTask(task) {
 async function executeUserCodexRequest(task) {
   try {
     const imageLine = task.images.length ? `\nImages: ${task.images.length}` : '';
-    await sendMessage(task.chatId, `Working on it...\nProject: ${task.project}${imageLine}`);
+    const paths = await ensureProjectFiles(task.project);
+    const repositoryWarnings = formatRepositoryWarnings(paths.repository);
+    await sendMessage(task.chatId, [`Working on it...\nProject: ${task.project}${imageLine}`, repositoryWarnings].filter(Boolean).join('\n\n'));
     if (task.stopRequested) return;
     const prompt = await buildQuestionPrompt(task.question, { chatId: task.chatId, project: task.project, images: task.images });
     if (task.stopRequested) return;
     task.phase = 'running';
     const answer = await runCodex(prompt, {
       chatId: task.chatId,
+      project: task.project,
       images: task.images,
       onChild: (child) => attachCodexChild(task, child),
     });
@@ -2272,6 +2332,7 @@ async function executeSteerCodexRequest(task) {
     task.phase = 'running';
     const answer = await runCodex(task.question, {
       chatId: task.chatId,
+      project: task.project,
       resumeLast: true,
       onChild: (child) => attachCodexChild(task, child),
     });
@@ -2392,6 +2453,7 @@ async function executeOpenClawDiagTask(task) {
     task.phase = 'running';
     const answer = await runCodex(prompt, {
       chatId: task.chatId,
+      project: 'openclaw',
       onChild: (child) => attachCodexChild(task, child),
     });
     clearActiveTaskChild(task);
@@ -2740,9 +2802,10 @@ async function handle(chatId, text, source = {}) {
         await sendMessage(chatId, 'Project name is invalid. Use letters, numbers, dot, dash, or underscore.');
         return;
       }
-      await ensureProjectFiles(requested);
+      const paths = await ensureProjectFiles(requested);
       await setChatState(chatId, { project: requested, history: [] });
-      await sendMessage(chatId, `Created and switched to project ${requested}. Session history was reset.`);
+      const repositoryWarnings = formatRepositoryWarnings(paths.repository);
+      await sendMessage(chatId, [`Created and switched to project ${requested}. Session history was reset.`, `Repository: ${paths.repo}`, repositoryWarnings].filter(Boolean).join('\n'));
       await sendProjectsMenu(chatId, 'Projects menu updated.');
       return;
     }

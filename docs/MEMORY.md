@@ -2,16 +2,19 @@
 
 `codex-ops` gives Codex a small durable memory layer on the VPS. The goal is to keep useful project knowledge close to the system being built and operated, instead of relying only on Telegram history or a local notebook.
 
-## Files created out of the box
+## Project files created out of the box
 
-On bootstrap and bot startup, these memory files are created for each project if they are missing:
+On bootstrap and bot startup, these files and directories are created for each project if they are missing:
 
+- `/srv/codex-ops/projects/<project>/repo`: project-local git repository used as the default `codex exec` workspace.
 - `/srv/codex-ops/projects/<project>/CONTEXT.md`: project-specific facts and scope.
 - `/srv/codex-ops/projects/<project>/RUNBOOK.md`: project-specific operations checklist.
 - `/srv/codex-ops/projects/<project>/CHANGELOG.md`: project-specific chronological memory for completed changes and planned-but-not-done work.
 - `/srv/codex-ops/projects/<project>/NOTES.md`: project-specific durable notes, pitfalls, pending work, and decisions.
 
-The default projects are `openclaw` and `server`. New projects created with `/project new <name>` get their own `CONTEXT.md`, `RUNBOOK.md`, `CHANGELOG.md`, and `NOTES.md`.
+The default projects are `openclaw` and `server`. New projects created with `/project new <name>` get their own `repo`, `CONTEXT.md`, `RUNBOOK.md`, `CHANGELOG.md`, and `NOTES.md`.
+
+If an older project directory does not have `repo` yet, the bot creates it automatically the next time that project is ensured, switched to, shown in context, or used for a Codex request. Repositories start without a git remote; until a remote is configured, Codex can commit locally but has nowhere to push.
 
 The host-level files `/srv/codex-ops/OPS_CONTEXT.md` and `/srv/codex-ops/RUNBOOK_OPENCLAW.md` are still used for broad operational context, but project history belongs in project memory.
 

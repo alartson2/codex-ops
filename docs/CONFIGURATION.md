@@ -13,7 +13,7 @@ All runtime configuration is loaded from `/etc/codex-ops/bot.env`.
 - `STATE_DIR` (default: `/var/lib/codexops/state`): bot offset/chat state/debug logs.
 - `UPLOADS_DIR` (default: `$STATE_DIR/uploads`): downloaded Telegram image attachments passed to `codex exec --image`.
 - `OPENCLAW_CONTAINER` (default: `openclaw-yvrh-openclaw-1`): container used by OpenClaw diagnostics.
-- `CODEX_CWD` (default: `/srv/codex-ops/incidents`): working directory for `codex exec`.
+- `CODEX_CWD` (default: `/srv/codex-ops/incidents`): fallback working directory for `codex exec` when no active project repository is available. Normal project requests run from `/srv/codex-ops/projects/<project>/repo`.
 - `HOST_LABEL` (default: hostname): display label in bot responses.
 - `ASSISTANT_LANGUAGE` (default: `Russian`): language instruction passed into Codex prompts.
 

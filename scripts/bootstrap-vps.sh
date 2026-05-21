@@ -36,7 +36,7 @@ require_ubuntu() {
 ensure_base_packages() {
   log "Installing base packages..."
   apt-get update -y
-  apt-get install -y ca-certificates curl gnupg lsb-release rsync
+  apt-get install -y ca-certificates curl git gnupg lsb-release rsync
   if command -v docker >/dev/null 2>&1; then
     log "Docker is already present: $(docker --version 2>/dev/null || echo unknown)"
   else
@@ -111,10 +111,21 @@ prepare_paths() {
   install -d -m 0755 /srv/codex-ops
   install -d -m 0755 /srv/codex-ops/incidents
   install -d -m 0755 /srv/codex-ops/projects/openclaw
+  install -d -m 0755 /srv/codex-ops/projects/openclaw/repo
   install -d -m 0755 /srv/codex-ops/projects/server
+  install -d -m 0755 /srv/codex-ops/projects/server/repo
   install -d -m 0755 /var/lib/codexops/state
   install -d -m 0755 /var/lib/codexops/state/uploads
   install -d -m 0755 /var/lib/codexops/.codex
+}
+
+ensure_project_repositories() {
+  log "Ensuring default project repositories..."
+  for repo in /srv/codex-ops/projects/openclaw/repo /srv/codex-ops/projects/server/repo; do
+    if ! git -C "${repo}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      git -C "${repo}" init >/dev/null
+    fi
+  done
 }
 
 seed_context_files() {
@@ -270,6 +281,7 @@ main() {
   ensure_user
   deploy_tree
   prepare_paths
+  ensure_project_repositories
   seed_context_files
   install_env_file
   install_systemd_unit
