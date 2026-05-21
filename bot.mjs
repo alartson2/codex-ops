@@ -314,6 +314,26 @@ function looksLikeCodexSubscription403(text) {
   );
 }
 
+function looksLikeCodexAuth401(text) {
+  const value = String(text || '');
+  if (!value) return false;
+  return (
+    (
+      value.includes('401 Unauthorized')
+      || value.includes('token_expired')
+      || value.includes('refresh_token_reused')
+      || value.includes('Provided authentication token is expired')
+      || value.includes('access token could not be refreshed')
+    )
+    && (
+      value.includes('chatgpt.com/backend-api/codex/responses')
+      || value.includes('chatgpt.com/backend-api/codex/models')
+      || value.includes('Failed to refresh token')
+      || value.includes('codex_login::auth::manager')
+    )
+  );
+}
+
 class TelegramApiError extends Error {
   constructor(method, data, status) {
     super(`Telegram API ${method} failed: ${JSON.stringify(data)}`);
@@ -1778,11 +1798,17 @@ async function runCodex(prompt, options = {}) {
         'The task may be large. Increase CODEX_EXEC_TIMEOUT_MS or set it to 0 for no timeout.',
         `Full diagnostic dump saved to: ${debugFile}`,
       ].join('\n');
-    } else if (looksLikeCodexSubscription403(combined)) {
+    } else if (looksLikeCodexSubscription403(combined) || looksLikeCodexAuth401(combined)) {
+      const authStatus = looksLikeCodexAuth401(combined)
+        ? 'native subscription authentication returned 401, usually an expired or reused refresh token.'
+        : 'ChatGPT backend returned 403 for native subscription authentication.';
       finalText = [
-        'Codex could not answer: ChatGPT backend returned 403 for native subscription authentication.',
+        `Codex could not answer: ${authStatus}`,
         '',
-        'What to do over SSH:',
+        'What to do:',
+        '1) In Telegram: /codex login',
+        '',
+        'Or over SSH:',
         '1) sudo /opt/codex-ops/scripts/codex-auth.sh logout',
         '2) sudo /opt/codex-ops/scripts/codex-auth.sh login',
         '3) sudo systemctl restart codex-telegram-bot.service',
