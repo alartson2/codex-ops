@@ -33,6 +33,7 @@ const OUTBOUND_DELAY_MS = Math.max(0, Number(process.env.OUTBOUND_DELAY_MS || '2
 const TG_RETRY_ATTEMPTS = Math.max(1, Number(process.env.TG_RETRY_ATTEMPTS || '3') || 3);
 const TG_RETRY_FALLBACK_DELAY_MS = Math.max(500, Number(process.env.TG_RETRY_FALLBACK_DELAY_MS || '2000') || 2000);
 const TG_RETRY_MAX_WAIT_MS = Math.max(1000, Number(process.env.TG_RETRY_MAX_WAIT_MS || '120000') || 120000);
+const TELEGRAM_POLL_ERROR_LOG_INTERVAL_MS = readOptionalNonNegativeMs('TELEGRAM_POLL_ERROR_LOG_INTERVAL_MS', 60000, { minPositive: 5000 });
 const HISTORICAL_INCIDENT_LIMIT = Math.max(1000, Number(process.env.HISTORICAL_INCIDENT_LIMIT || '4000') || 4000);
 const CODEX_DEVICE_AUTH_TIMEOUT_MS = Math.max(120000, Number(process.env.CODEX_DEVICE_AUTH_TIMEOUT_MS || '900000') || 900000);
 const CODEX_EXEC_TIMEOUT_MS = Math.max(0, Number(process.env.CODEX_EXEC_TIMEOUT_MS || '0') || 0);
@@ -75,6 +76,7 @@ const TELEGRAM_ALLOWED_UPDATES = ['message', 'edited_message', 'callback_query']
 const voiceDrafts = new Map();
 const voiceSupplementByChat = new Map();
 let hostRequestPollRunning = false;
+let lastPollErrorLogAt = 0;
 
 function readOptionalNonNegativeMs(name, defaultValue, opts = {}) {
   const raw = process.env[name];
@@ -3639,7 +3641,12 @@ async function poll() {
           } catch {}
         }
       }
-    } catch {
+    } catch (error) {
+      const now = Date.now();
+      if (TELEGRAM_POLL_ERROR_LOG_INTERVAL_MS === 0 || now - lastPollErrorLogAt >= TELEGRAM_POLL_ERROR_LOG_INTERVAL_MS) {
+        lastPollErrorLogAt = now;
+        console.warn(`[bot-poll-error] getUpdates failed; retrying in 5s: ${error && (error.stack || error.message || String(error))}`);
+      }
       await new Promise((r) => setTimeout(r, 5000));
     }
   }

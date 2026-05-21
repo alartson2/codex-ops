@@ -101,6 +101,7 @@ Voice messages are not sent directly to `codex exec`. The bot downloads the Tele
 - `TG_RETRY_ATTEMPTS` (default: `3`): retries for Telegram 429 responses.
 - `TG_RETRY_FALLBACK_DELAY_MS` (default: `2000`): fallback wait when retry_after is absent.
 - `TG_RETRY_MAX_WAIT_MS` (default: `120000`): max backoff wait.
+- `TELEGRAM_POLL_ERROR_LOG_INTERVAL_MS` (default: `60000`): throttle for `getUpdates` failure logs in journald. Set `0` to log every polling failure.
 
 ## Auth flow tuning
 
