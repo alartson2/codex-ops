@@ -36,7 +36,12 @@ require_ubuntu() {
 ensure_base_packages() {
   log "Installing base packages..."
   apt-get update -y
-  apt-get install -y ca-certificates curl gnupg lsb-release rsync docker.io
+  apt-get install -y ca-certificates curl gnupg lsb-release rsync
+  if command -v docker >/dev/null 2>&1; then
+    log "Docker is already present: $(docker --version 2>/dev/null || echo unknown)"
+  else
+    apt-get install -y docker.io
+  fi
   systemctl enable --now docker
 }
 
