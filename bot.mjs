@@ -1791,6 +1791,8 @@ async function buildQuestionPrompt(question, options = {}) {
     'Secondary mission: broader server setup and diagnostics.',
     `Active project for this chat: ${activeProject}.`,
     'Respect the active project first. Only widen scope when the user clearly asks for another system or the evidence requires it.',
+    'When the request, target project, repository, environment, or intended change is ambiguous, pause before making changes. Ask one concise clarifying question, or send a short implementation plan and wait for explicit operator confirmation instead of guessing.',
+    'If read-only investigation is needed to resolve ambiguity, do that first; if uncertainty remains before edits, deployments, restarts, or other state-changing actions, stop with the plan/question rather than continuing for a long time.',
     `Active project changelog file: ${paths.changelog}.`,
     'Use the active project CHANGELOG.md as chronological project memory for completed changes and planned-but-not-done work.',
     'Use the active project NOTES.md as durable project memory for facts, pitfalls, pending work, and decisions that should survive beyond recent chat history.',

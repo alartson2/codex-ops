@@ -54,6 +54,8 @@ Because the Codex run stays in the background, Telegram remains responsive durin
 - `/codex stop` cancels the active task and suppresses its final answer.
 - `/codex steer <instruction>` interrupts the active task and resumes the latest Codex session with the new operator instruction.
 
+If the request looks ambiguous, points at the wrong project, or could require risky state-changing work, the Codex prompt asks the agent to stop before changes and return a concise clarifying question or implementation plan. Use `/codex steer <instruction>` or send a follow-up request when you want it to continue.
+
 This helps with work such as:
 
 - large refactors on a VPS project

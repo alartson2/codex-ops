@@ -46,6 +46,7 @@ The goal is not to replace SSH completely. The goal is to make the common loop f
 - Telegram voice input with transcript review, implementation confirmation, supplements, and cancel
 - Periodic progress updates for long-running Codex tasks
 - Emergency task control with `/codex stop` and `/codex steer <instruction>`
+- Ambiguity guardrail: when Codex is unsure about the target project, environment, or requested change, it should ask a concise question or return a short plan before making changes
 - Context status guidance for final remote Codex reports
 - Telegram HTML rendering for Codex Markdown output
 - 429-aware Telegram send retry logic and anti-flood truncation
