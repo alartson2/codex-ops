@@ -16,7 +16,7 @@ All runtime configuration is loaded from `/etc/codex-ops/bot.env`.
 - `DEFAULT_PROJECT` (default: `server`): project selected for new chats and host-level setup tasks.
 - `CODEX_CWD` (default: `/srv/codex-ops/incidents`): fallback working directory for `codex exec` when no active project repository is available. Normal project requests run from `/srv/codex-ops/projects/<project>`.
 - `HOST_LABEL` (default: hostname): display label in bot responses.
-- `ASSISTANT_LANGUAGE` (default: `Russian`): language instruction passed into Codex prompts.
+- `ASSISTANT_LANGUAGE` (default: `English`): language instruction passed into Codex prompts.
 
 ## Durable host request queues
 
@@ -191,7 +191,7 @@ PROJECTS_DIR=/srv/codex-ops/projects
 DEFAULT_PROJECT=server
 CODEX_CWD=/srv/codex-ops/incidents
 HOST_LABEL=prod-vps-1
-ASSISTANT_LANGUAGE=Russian
+ASSISTANT_LANGUAGE=English
 HISTORY_ITEMS=8
 HISTORY_ITEM_CHARS=1400
 MAX_MESSAGE=3500
