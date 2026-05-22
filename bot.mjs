@@ -14,12 +14,11 @@ const CHAT_STATE_FILE = process.env.CHAT_STATE_FILE || path.join(STATE_DIR, 'cha
 const OFFSET_STATE_FILE = process.env.OFFSET_STATE_FILE || path.join(STATE_DIR, 'telegram-offset.txt');
 const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(STATE_DIR, 'uploads');
 const PROJECTS_DIR = process.env.PROJECTS_DIR || '/srv/codex-ops/projects';
-const DEFAULT_PROJECT = process.env.DEFAULT_PROJECT || 'openclaw';
-const OPENCLAW_CONTAINER = process.env.OPENCLAW_CONTAINER || 'openclaw-yvrh-openclaw-1';
+const DEFAULT_PROJECT = process.env.DEFAULT_PROJECT || 'server';
 const CODEX_HOME = process.env.CODEX_HOME || '/var/lib/codexops/.codex';
 const CODEX_CWD = process.env.CODEX_CWD || INCIDENTS_DIR;
 const OPS_CONTEXT_FILE = process.env.OPS_CONTEXT_FILE || '/srv/codex-ops/OPS_CONTEXT.md';
-const RUNBOOK_FILE = process.env.RUNBOOK_FILE || '/srv/codex-ops/RUNBOOK_OPENCLAW.md';
+const RUNBOOK_FILE = process.env.RUNBOOK_FILE || '/srv/codex-ops/RUNBOOK.md';
 const HOST_LABEL = process.env.HOST_LABEL || os.hostname();
 const ASSISTANT_LANGUAGE = (process.env.ASSISTANT_LANGUAGE || 'Russian').trim() || 'Russian';
 const HISTORY_ITEMS = Math.max(0, Number(process.env.HISTORY_ITEMS || '8') || 8);
@@ -47,9 +46,6 @@ const HOST_REQUEST_DIR_NAMES = readListEnv('HOST_REQUEST_DIR_NAMES', ['host-requ
 const HOST_REQUEST_EXTRA_DIRS = readListEnv('HOST_REQUEST_DIRS', [
   path.join(STATE_DIR, 'host-requests'),
   path.join(STATE_DIR, 'scheduled-requests'),
-  '/data/.openclaw/team-memory/host-requests',
-  '/data/.openclaw/team-memory/staging-requests',
-  '/data/.openclaw/team-memory/scheduled-requests',
 ]);
 const HOST_REQUEST_RUNNING_STALE_MS = readOptionalNonNegativeMs('HOST_REQUEST_RUNNING_STALE_MS', 21600000, { minPositive: 60000 });
 const TELEGRAM_IMAGE_MAX_BYTES = Math.max(1000000, Number(process.env.TELEGRAM_IMAGE_MAX_BYTES || '10000000') || 10000000);
@@ -1812,7 +1808,7 @@ async function runHostRequestPollOnce() {
   await fs.mkdir(STATE_DIR, { recursive: true });
   await fs.mkdir(UPLOADS_DIR, { recursive: true });
   await fs.mkdir(PROJECTS_DIR, { recursive: true });
-  await ensureProjectFiles('openclaw');
+  await ensureProjectFiles(DEFAULT_PROJECT);
   await ensureProjectFiles('server');
   await ensureHostRequestQueueDirs();
   await pollHostRequests('manual-once');
@@ -1857,28 +1853,10 @@ function startHostRequestPoller() {
 }
 
 function defaultProjectContext(project) {
-  if (project === 'openclaw') {
-    return `# OpenClaw Project Context
-
-Use this project when the user is asking about OpenClaw administration, incidents, upgrades, container internals, or project work that depends on the OpenClaw runtime.
-
-Key runtime facts:
-- main container: ${OPENCLAW_CONTAINER}
-- wrapper to inspect on failures: /hostinger/server.mjs
-- internal ports to verify: 127.0.0.1:18789 and 127.0.0.1:18791
-- incident archive on host: ${INCIDENTS_DIR}
-
-Important working style:
-- diagnose before proposing fixes
-- prefer live server evidence over stale notes
-- re-check approval-flow and gateway-respawn behavior after upgrades or image rebuilds
-- if project workspaces are not on the host, inspect them through docker exec
-`;
-  }
   if (project === 'server') {
     return `# Server Project Context
 
-Use this project for broader host administration outside the narrow OpenClaw incident path.
+Use this project for broad host administration and server diagnostics.
 
 Key scope:
 - host health and systemd services
@@ -1889,7 +1867,7 @@ Key scope:
 Important working style:
 - stay concise
 - prefer direct evidence from the host
-- keep OpenClaw-specific assumptions separate unless the user explicitly links the task to OpenClaw
+- keep application-specific assumptions in project memory, not in the public bot code
 `;
   }
   return `# ${project} Project Context
@@ -1901,16 +1879,6 @@ Use it as the persistent context bucket for future work related to this project.
 }
 
 function defaultProjectRunbook(project) {
-  if (project === 'openclaw') {
-    return `# OpenClaw Project Runbook
-
-Fast checks:
-- docker ps and docker inspect for ${OPENCLAW_CONTAINER}
-- verify ports 18789 and 18791 inside the container
-- inspect docker logs and /tmp/openclaw/openclaw-YYYY-MM-DD.log
-- inspect /hostinger/server.mjs if gateway or approval behavior looks suspicious
-`;
-  }
   if (project === 'server') {
     return `# Server Project Runbook
 
@@ -1928,36 +1896,12 @@ Add the short operational checklist for this project here.
 }
 
 function defaultProjectNotes(project) {
-  if (project === 'openclaw') {
-    return `# OpenClaw Notes
-
-## Important facts
-
-Known upgrade and maintenance considerations:
-- persist fixes into the image/build path, not only the live container filesystem
-- re-check /hostinger/server.mjs after every OpenClaw image rebuild or version upgrade
-- validate child gateway respawn still works after upgrades
-- validate devices approve flow still has single-flight protection, timeout, and cleanup
-- watch for Chromium/browser profile lock symptoms and handshake timeouts during restarts
-- after upgrades, verify ports 18789 and 18791, recent docker logs, gateway file logs, and process tree stability
-
-## Pending
-
-- user mentioned older upgrade pain points collected elsewhere for /projects-based work
-- current live check on 2026-04-19 did not find /projects inside the active container, so those notes were not auto-imported yet
-- when the source path is identified later, filter the useful parts into this file
-
-## Done
-
-- Add durable OpenClaw outcomes and decisions here.
-`;
-  }
   if (project === 'server') {
     return `# Server Notes
 
 ## Important facts
 
-Use this file for cross-service operational notes that are broader than OpenClaw.
+Use this file for cross-service operational notes.
 
 ## Pending
 
@@ -2266,18 +2210,23 @@ async function collectStatus() {
     'echo "HOST $(hostname)"',
     'echo "TIME $(date -Is)"',
     'echo ---',
-    `docker ps --format '{{.Names}}\t{{.Status}}' | grep -E '^${OPENCLAW_CONTAINER}\\b' || true`,
+    'echo "# System load"',
+    'uptime || true',
     'echo ---',
-    `docker inspect -f '{{.State.Status}} restartCount={{.RestartCount}} startedAt={{.State.StartedAt}}' ${OPENCLAW_CONTAINER}`,
+    'echo "# Disk"',
+    "df -h / /srv /var 2>/dev/null || df -h /",
     'echo ---',
-    `docker exec ${OPENCLAW_CONTAINER} python3 - <<'PY'\nimport socket\nfor port in (18789,18791):\n s=socket.socket(); s.settimeout(1)\n try:\n  s.connect((\'127.0.0.1\', port)); print(f'{port} open')\n except Exception as e:\n  print(f'{port} closed {e}')\n finally:\n  s.close()\nPY`,
+    'echo "# Docker containers"',
+    "docker ps --format '{{.Names}}\\t{{.Image}}\\t{{.Status}}' || true",
     'echo ---',
-    `docker exec ${OPENCLAW_CONTAINER} ps -eo pid,ppid,stat,args --forest | sed -n '1,80p'`,
+    'echo "# Failed systemd units"',
+    "systemctl --failed --no-pager --plain 2>/dev/null | sed -n '1,80p' || true",
   ].join('\n');
   return sh(script, 120000);
 }
 
-async function collectOpenClawDiag(options = {}) {
+async function collectProjectDiag(project, options = {}) {
+  const safeProject = normalizeProjectName(project) || DEFAULT_PROJECT;
   const script = [
     'set -euo pipefail',
     'echo "# Host"',
@@ -2285,21 +2234,17 @@ async function collectOpenClawDiag(options = {}) {
     'date -Is',
     'echo',
     'echo "# Docker state"',
-    `docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E '^${OPENCLAW_CONTAINER}\\b' || true`,
-    `docker inspect -f '{{json .Config.Cmd}}\n{{.State.Status}} restartCount={{.RestartCount}} startedAt={{.State.StartedAt}} finishedAt={{.State.FinishedAt}}' ${OPENCLAW_CONTAINER}`,
+    "docker ps --format '{{.Names}}\\t{{.Image}}\\t{{.Status}}' || true",
     'echo',
-    'echo "# Ports and process tree inside container"',
-    `docker exec ${OPENCLAW_CONTAINER} python3 - <<'PY'\nimport subprocess, socket\nprint('PROCESS_TREE')\nprint(subprocess.check_output(['ps','-eo','pid,ppid,stat,args','--forest'], text=True))\nprint('PORTS')\nfor port in (18789,18791):\n s=socket.socket(); s.settimeout(1)\n try:\n  s.connect((\'127.0.0.1\', port)); print(f'{port} open')\n except Exception as e:\n  print(f'{port} closed {e}')\n finally:\n  s.close()\nPY`,
+    'echo "# Failed systemd units"',
+    "systemctl --failed --no-pager --plain 2>/dev/null | sed -n '1,120p' || true",
     'echo',
-    'echo "# Recent container logs"',
-    `docker logs --since 25m ${OPENCLAW_CONTAINER} 2>&1 | tail -n 220`,
-    'echo',
-    'echo "# Recent gateway file log"',
-    `docker exec ${OPENCLAW_CONTAINER} sh -lc 'tail -n 220 /tmp/openclaw/openclaw-$(date +%F).log 2>/dev/null || true'`,
+    'echo "# Recent codex-ops service logs"',
+    'journalctl -u codex-telegram-bot.service --since "30 minutes ago" --no-pager -n 160 2>/dev/null || true',
     'echo',
     'echo "# Incident docs on host"',
-    `ls -1t ${INCIDENTS_DIR} | head -n 10`,
-    `for f in $(ls -1t ${INCIDENTS_DIR} | head -n 2); do echo "--- INCIDENT:$f ---"; sed -n '1,140p' ${INCIDENTS_DIR}/$f; done`,
+    `ls -1t ${INCIDENTS_DIR} 2>/dev/null | head -n 10 || true`,
+    `for f in $(find ${INCIDENTS_DIR} -maxdepth 1 -type f -name '*${safeProject}*' -printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -n 2 | cut -d' ' -f2-); do echo "--- INCIDENT:$(basename "$f") ---"; sed -n '1,140p' "$f"; done`,
   ].join('\n');
   return sh(script, 300000, { onChild: options.onChild, killProcessGroup: true });
 }
@@ -2462,7 +2407,7 @@ async function buildQuestionPrompt(question, options = {}) {
   const projectChangelog = await readMaybe(paths.changelog, 16000);
   const projectNotes = await readMaybe(paths.notes, 14000);
   const historyText = options.disableHistory ? '(disabled for this request)' : formatHistory(chatState.history);
-  const historical = activeProject === 'openclaw' ? await latestIncident('openclaw') : await latestIncident(activeProject);
+  const historical = await latestIncident(activeProject);
   const historicalText = historical ? `${historical.name}\n\n${compactIncidentForPrompt(historical.text)}` : '';
   const repositoryText = [
     `Path: ${paths.repo}`,
@@ -2487,8 +2432,8 @@ async function buildQuestionPrompt(question, options = {}) {
   const contextPressure = contextPressureForTokens(approxPromptTokens);
   return [
     'You are the host-level Codex ops assistant for this server.',
-    'Primary mission: OpenClaw administration and incident response.',
-    'Secondary mission: broader server setup and diagnostics.',
+    'Primary mission: server operations, incident response, and project maintenance.',
+    'Secondary mission: broader setup, diagnostics, and implementation work requested by trusted operators.',
     `Active project for this chat: ${activeProject}.`,
     'Respect the active project first. Only widen scope when the user clearly asks for another system or the evidence requires it.',
     `Active project repository path: ${paths.repo}. Use it as the default workspace for project-local files and git operations.`,
@@ -2509,7 +2454,7 @@ async function buildQuestionPrompt(question, options = {}) {
     'For long-running tasks, emit short visible progress updates when meaningful milestones happen. These updates are not final answers.',
     'When Telegram image attachments are present, inspect the images passed via codex exec --image and answer using their visual content.',
     'Prefer direct practical answers and mention real uncertainty briefly when needed.',
-    'Some project workspaces may live inside the OpenClaw container rather than on the host.',
+    'Some project workspaces may live inside containers rather than on the host.',
     'For every final working report, end with a short context status footer.',
     'Context status footer rule: do not invent exact total context-window usage, percentages, or remaining-token counts. Exact model-context counters are not exposed inside this Telegram bridge unless a reliable runtime counter is explicitly available.',
     'Use the request context metadata below to give a qualitative context pressure estimate. Report exact remaining capacity as unavailable when it is unavailable.',
@@ -3032,7 +2977,7 @@ async function executeSteerCodexRequest(task) {
 function startCodexTask(task) {
   if (!task) return;
   if (task.kind === 'diag') {
-    task.promise = executeOpenClawDiagTask(task).catch((error) => handleTaskUnhandledError(task, error));
+    task.promise = executeProjectDiagTask(task).catch((error) => handleTaskUnhandledError(task, error));
     return;
   }
   if (task.kind === 'steer') {
@@ -3112,17 +3057,18 @@ async function runUserCodexRequest(chatId, question, extraImages = [], source = 
   startCodexTask(task);
 }
 
-async function executeOpenClawDiagTask(task) {
+async function executeProjectDiagTask(task) {
   try {
-    await sendMessage(task.chatId, 'Collecting OpenClaw diagnostics and sending context to Codex...');
+    const project = normalizeProjectName(task.project) || DEFAULT_PROJECT;
+    await sendMessage(task.chatId, `Collecting diagnostics for ${project} and sending context to Codex...`);
     if (task.stopRequested) return;
     task.phase = 'collecting';
-    const collected = await collectOpenClawDiag({ onChild: (child) => setActiveTaskChild(task, child) });
+    const collected = await collectProjectDiag(project, { onChild: (child) => setActiveTaskChild(task, child) });
     clearActiveTaskChild(task);
     if (task.stopRequested) return;
     const context = [collected.stdout, collected.stderr].filter(Boolean).join('\n\n').trim();
     const prompt = [
-      await buildQuestionPrompt('Diagnose current OpenClaw state on this server. Give: 1) current state 2) likely root cause 3) strongest evidence 4) what to check next 5) whether service is currently up. Do not propose changes unless the evidence strongly supports them.', { chatId: task.chatId, project: 'openclaw', disableHistory: true }),
+      await buildQuestionPrompt(`Diagnose current state for project ${project} on this server. Give: 1) current state 2) likely root cause if there is a problem 3) strongest evidence 4) what to check next 5) whether relevant services appear to be up. Do not propose changes unless the evidence strongly supports them.`, { chatId: task.chatId, project, disableHistory: true }),
       '',
       '<runtime_context>',
       context,
@@ -3132,14 +3078,14 @@ async function executeOpenClawDiagTask(task) {
     task.phase = 'running';
     const answer = await runCodex(prompt, {
       chatId: task.chatId,
-      project: 'openclaw',
+      project,
       onChild: (child) => attachCodexChild(task, child),
     });
     clearActiveTaskChild(task);
     if (task.stopRequested) return;
     task.phase = 'finalizing';
-    const file = path.join(INCIDENTS_DIR, `diag_openclaw_${nowStamp()}.md`);
-    const doc = ['# OpenClaw diagnostic run', '', `Time: ${new Date().toISOString()}`, '', '## Codex analysis', '', answer, '', '## Raw context', '', '```text', context.slice(0, 120000), '```', ''].join('\n');
+    const file = path.join(INCIDENTS_DIR, `diag_${project}_${nowStamp()}.md`);
+    const doc = [`# ${project} diagnostic run`, '', `Time: ${new Date().toISOString()}`, '', '## Codex analysis', '', answer, '', '## Raw context', '', '```text', context.slice(0, 120000), '```', ''].join('\n');
     await fs.writeFile(file, doc, 'utf8');
     await sendMessage(task.chatId, answer);
     await sendMessage(task.chatId, `Saved diagnostic note: ${path.basename(file)}`);
@@ -3154,13 +3100,14 @@ async function executeOpenClawDiagTask(task) {
   }
 }
 
-async function runOpenClawDiagRequest(chatId, source = {}) {
+async function runProjectDiagRequest(chatId, project, source = {}) {
+  const safeProject = normalizeProjectName(project) || DEFAULT_PROJECT;
   if (activeTask || taskQueue.length) {
     const queued = createQueuedTask({
       chatId,
       kind: 'diag',
-      project: 'openclaw',
-      question: 'Diagnose current OpenClaw state on this server.',
+      project: safeProject,
+      question: `Diagnose current state for project ${safeProject} on this server.`,
       sourceMessageId: source.messageId || null,
     });
     taskQueue.push(queued);
@@ -3171,8 +3118,8 @@ async function runOpenClawDiagRequest(chatId, source = {}) {
   const task = createActiveTask({
     chatId,
     kind: 'diag',
-    project: 'openclaw',
-    question: 'Diagnose current OpenClaw state on this server.',
+    project: safeProject,
+    question: `Diagnose current state for project ${safeProject} on this server.`,
     sourceMessageId: source.messageId || null,
   });
   startCodexTask(task);
@@ -3366,9 +3313,9 @@ async function handle(chatId, text, source = {}) {
       'Commands:',
       '/ask <question>',
       '/status',
-      '/diag openclaw',
-      '/lastincident openclaw',
-      '/runbook openclaw',
+      '/diag [project]',
+      '/lastincident [project]',
+      '/runbook [project]',
       '/projects',
       '/project <name>',
       '/project new <name>',
@@ -3548,31 +3495,37 @@ async function handle(chatId, text, source = {}) {
   if (trimmed === '/status') {
     const state = await getChatState(chatId);
     const result = await collectStatus();
-    const body = [`Active project: ${state.project}`, '', 'OpenClaw status:', result.stdout.trim() || '(no output)'];
+    const body = [`Active project: ${state.project}`, '', 'Host status:', result.stdout.trim() || '(no output)'];
     if (result.code !== 0 && result.stderr.trim()) body.push(`stderr:\n${result.stderr.trim()}`);
     await sendMessage(chatId, body.join('\n\n'));
     return;
   }
   if (trimmed.startsWith('/lastincident')) {
-    const item = await latestIncident('openclaw');
+    const state = await getChatState(chatId);
+    const project = normalizeProjectName(trimmed.slice('/lastincident'.length).trim()) || state.project || DEFAULT_PROJECT;
+    const item = await latestIncident(project);
     if (!item) {
-      await sendMessage(chatId, 'No incident docs found.');
+      await sendMessage(chatId, `No incident docs found for ${project}.`);
       return;
     }
     await sendMessage(chatId, `Latest incident: ${item.name}\n\n${item.text.slice(0, 3000)}`);
     return;
   }
   if (trimmed.startsWith('/runbook')) {
-    const runbook = (await readMaybe(projectPaths('openclaw').runbook, 12000)) || (await readMaybe(RUNBOOK_FILE, 12000));
+    const state = await getChatState(chatId);
+    const project = normalizeProjectName(trimmed.slice('/runbook'.length).trim()) || state.project || DEFAULT_PROJECT;
+    const runbook = (await readMaybe(projectPaths(project).runbook, 12000)) || (await readMaybe(RUNBOOK_FILE, 12000));
     if (!runbook) {
-      await sendMessage(chatId, 'No runbook found.');
+      await sendMessage(chatId, `No runbook found for ${project}.`);
       return;
     }
     await sendMessage(chatId, runbook.slice(0, 3000));
     return;
   }
-  if (trimmed === '/diag openclaw') {
-    await runOpenClawDiagRequest(chatId, source);
+  if (trimmed === '/diag' || trimmed.startsWith('/diag ')) {
+    const state = await getChatState(chatId);
+    const project = normalizeProjectName(trimmed.slice('/diag'.length).trim()) || state.project || DEFAULT_PROJECT;
+    await runProjectDiagRequest(chatId, project, source);
     return;
   }
   if (trimmed.startsWith('/ask ')) {
@@ -3661,7 +3614,7 @@ async function main() {
   await fs.mkdir(STATE_DIR, { recursive: true });
   await fs.mkdir(UPLOADS_DIR, { recursive: true });
   await fs.mkdir(PROJECTS_DIR, { recursive: true });
-  await ensureProjectFiles('openclaw');
+  await ensureProjectFiles(DEFAULT_PROJECT);
   await ensureProjectFiles('server');
   await ensureHostRequestQueueDirs();
   await initializeOffset();

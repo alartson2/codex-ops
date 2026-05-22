@@ -81,9 +81,9 @@ sudo grep -Ev '^\s*($|#)' /etc/codex-ops/bot.env
 
 ## Incident note workflow
 
-- `/diag openclaw` collects runtime evidence and stores a diagnostic markdown note.
+- `/diag [project]` collects runtime evidence and stores a diagnostic markdown note.
 - incident output path is controlled by `INCIDENTS_DIR`.
-- use `/lastincident openclaw` to retrieve latest note summary.
+- use `/lastincident [project]` to retrieve the latest note summary for a project.
 
 ## Public release hygiene checklist
 

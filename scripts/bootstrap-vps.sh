@@ -4,9 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-OPENCLAW_CONTAINER_DEFAULT="openclaw-yvrh-openclaw-1"
-OPENCLAW_CONTAINER="${OPENCLAW_CONTAINER:-$OPENCLAW_CONTAINER_DEFAULT}"
-
 log() {
   printf '[bootstrap] %s\n' "$*"
 }
@@ -113,9 +110,8 @@ prepare_paths() {
   install -d -m 0755 /etc/codex-ops
   install -d -m 0755 /srv/codex-ops
   install -d -m 0755 /srv/codex-ops/incidents
-  install -d -m 0755 /srv/codex-ops/projects/openclaw
   install -d -m 0755 /srv/codex-ops/projects/server
-  for project in openclaw server; do
+  for project in server; do
     for queue in host-requests staging-requests scheduled-requests; do
       for status in pending running done failed; do
         install -d -m 0755 "/srv/codex-ops/projects/${project}/${queue}/${status}"
@@ -134,7 +130,7 @@ prepare_paths() {
 
 ensure_project_repositories() {
   log "Ensuring default project repositories..."
-  for repo in /srv/codex-ops/projects/openclaw /srv/codex-ops/projects/server; do
+  for repo in /srv/codex-ops/projects/server; do
     if ! git -C "${repo}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       git -C "${repo}" init >/dev/null
     fi
@@ -146,18 +142,18 @@ seed_context_files() {
     cat >/srv/codex-ops/OPS_CONTEXT.md <<'EOF'
 # Codex Ops Context
 
-Host-level Codex + Telegram operations layer for OpenClaw.
+Host-level Codex + Telegram operations layer for this server.
 EOF
   fi
 
-  if [[ ! -f /srv/codex-ops/RUNBOOK_OPENCLAW.md ]]; then
-    cat >/srv/codex-ops/RUNBOOK_OPENCLAW.md <<'EOF'
-# OpenClaw Runbook
+  if [[ ! -f /srv/codex-ops/RUNBOOK.md ]]; then
+    cat >/srv/codex-ops/RUNBOOK.md <<'EOF'
+# Codex Ops Runbook
 
 Fast check list:
-1. docker ps for openclaw container
-2. docker logs --since 25m
-3. internal ports 18789 and 18791
+1. Check systemd service health.
+2. Check Docker containers when the target project uses containers.
+3. Check recent project memory and incident notes.
 EOF
   fi
 
@@ -197,41 +193,6 @@ EOF
 EOF
   fi
 
-  if [[ ! -f /srv/codex-ops/projects/openclaw/CHANGELOG.md ]]; then
-    cat >/srv/codex-ops/projects/openclaw/CHANGELOG.md <<'EOF'
-# openclaw Changelog
-
-Use this file as the chronological memory for completed changes and planned-but-not-done work in this project.
-
-## Unreleased
-
-### Done
-
-- Initial project changelog created.
-
-### Planned
-
-- Add future planned work here when a task is agreed but not completed yet.
-EOF
-  fi
-
-  if [[ ! -f /srv/codex-ops/projects/openclaw/NOTES.md ]]; then
-    cat >/srv/codex-ops/projects/openclaw/NOTES.md <<'EOF'
-# OpenClaw Notes
-
-## Important facts
-
-- Add stable OpenClaw runtime facts here.
-
-## Pending
-
-- Add planned but unfinished work here.
-
-## Done
-
-- Add durable outcomes and decisions here.
-EOF
-  fi
 }
 
 install_env_file() {
@@ -250,7 +211,8 @@ ALLOWED_CHAT_IDS=
 INCIDENTS_DIR=/srv/codex-ops/incidents
 STATE_DIR=/var/lib/codexops/state
 UPLOADS_DIR=/var/lib/codexops/state/uploads
-OPENCLAW_CONTAINER=${OPENCLAW_CONTAINER}
+PROJECTS_DIR=/srv/codex-ops/projects
+DEFAULT_PROJECT=server
 CODEX_CWD=/srv/codex-ops/incidents
 HOST_LABEL=$(hostname)
 EOF

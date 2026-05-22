@@ -12,7 +12,8 @@ All runtime configuration is loaded from `/etc/codex-ops/bot.env`.
 - `INCIDENTS_DIR` (default: `/srv/codex-ops/incidents`): incident and diagnostic notes.
 - `STATE_DIR` (default: `/var/lib/codexops/state`): bot offset/chat state/debug logs.
 - `UPLOADS_DIR` (default: `$STATE_DIR/uploads`): downloaded Telegram image attachments passed to `codex exec --image`.
-- `OPENCLAW_CONTAINER` (default: `openclaw-yvrh-openclaw-1`): container used by OpenClaw diagnostics.
+- `PROJECTS_DIR` (default: `/srv/codex-ops/projects`): project repositories and memory files.
+- `DEFAULT_PROJECT` (default: `server`): project selected for new chats and host-level setup tasks.
 - `CODEX_CWD` (default: `/srv/codex-ops/incidents`): fallback working directory for `codex exec` when no active project repository is available. Normal project requests run from `/srv/codex-ops/projects/<project>`.
 - `HOST_LABEL` (default: hostname): display label in bot responses.
 - `ASSISTANT_LANGUAGE` (default: `Russian`): language instruction passed into Codex prompts.
@@ -27,7 +28,7 @@ The bot can wake itself up from durable request files. This is the preferred mec
 - `HOST_REQUEST_STARTUP_DELAY_MS` (default: `30000`): startup delay before the first scan, so already-pending files are picked up soon after restart.
 - `HOST_REQUEST_RUNNING_STALE_MS` (default: `21600000`): age after which a `running/` request with no in-memory task is moved back to `pending/` for retry. Set `0` to disable recovery.
 - `HOST_REQUEST_DIR_NAMES` (default: `host-requests,staging-requests,scheduled-requests`): per-project queue directory names scanned under each `/srv/codex-ops/projects/<project>`.
-- `HOST_REQUEST_DIRS`: semicolon/comma/newline-separated extra absolute queue directories. Defaults include `$STATE_DIR/host-requests`, `$STATE_DIR/scheduled-requests`, and OpenClaw runtime mirror request directories under `/data/.openclaw/team-memory`.
+- `HOST_REQUEST_DIRS`: semicolon/comma/newline-separated extra absolute queue directories. Defaults include `$STATE_DIR/host-requests` and `$STATE_DIR/scheduled-requests`.
 
 Each queue may contain Markdown, text, or JSON files directly in the queue directory or in its `pending/` subdirectory. The bot ignores `README.md`, `.gitkeep`, and files whose names start with `_`. Picked files move to `running/`; they move to `done/` only after the Codex task completes successfully, or to `failed/` when the task fails.
 
@@ -37,21 +38,21 @@ Markdown request example:
 
 ```md
 ---
-project: openclaw
+project: server
 title: Check pending runtime request
 runAt: 2026-05-21T15:30:00+05:00
 ---
 
-Check the pending OpenClaw host request and report what changed.
+Check the pending host request and report what changed.
 ```
 
 JSON request example:
 
 ```json
 {
-  "project": "openclaw",
+  "project": "server",
   "runAt": "2026-05-21T15:30:00+05:00",
-  "question": "Check the pending OpenClaw host request and report what changed."
+  "question": "Check the pending host request and report what changed."
 }
 ```
 
@@ -186,7 +187,8 @@ ALLOWED_CHAT_IDS=123456789,987654321
 INCIDENTS_DIR=/srv/codex-ops/incidents
 STATE_DIR=/var/lib/codexops/state
 UPLOADS_DIR=/var/lib/codexops/state/uploads
-OPENCLAW_CONTAINER=openclaw-yvrh-openclaw-1
+PROJECTS_DIR=/srv/codex-ops/projects
+DEFAULT_PROJECT=server
 CODEX_CWD=/srv/codex-ops/incidents
 HOST_LABEL=prod-vps-1
 ASSISTANT_LANGUAGE=Russian

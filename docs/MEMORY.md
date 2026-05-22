@@ -12,7 +12,7 @@ On bootstrap and bot startup, these files and directories are created for each p
 - `/srv/codex-ops/projects/<project>/CHANGELOG.md`: project-specific chronological memory for completed changes and planned-but-not-done work.
 - `/srv/codex-ops/projects/<project>/NOTES.md`: project-specific durable notes, pitfalls, pending work, and decisions.
 
-The default projects are `openclaw` and `server`. New projects created with `/project new <name>` get their own git repository, `CONTEXT.md`, `RUNBOOK.md`, `CHANGELOG.md`, and `NOTES.md`.
+The default project is `server`. New projects created with `/project new <name>` get their own git repository, `CONTEXT.md`, `RUNBOOK.md`, `CHANGELOG.md`, and `NOTES.md`.
 
 If an older project directory is not a git repository yet, the bot runs `git init` automatically the next time that project is ensured, switched to, shown in context, or used for a Codex request. Repositories start without a git remote; until a remote is configured, Codex can commit locally but has nowhere to push.
 
@@ -20,7 +20,7 @@ Use `/project key` to generate and display a project deploy public key. Add that
 
 Before sending a final Telegram report for a regular Codex request or steer resume, the bot checks the active project repository. If files changed, it stages all repository changes and creates a local snapshot commit. If `origin` is configured, the bot then tries to push the snapshot. The report includes the commit hash and push result when a snapshot was created.
 
-The host-level files `/srv/codex-ops/OPS_CONTEXT.md` and `/srv/codex-ops/RUNBOOK_OPENCLAW.md` are still used for broad operational context, but project history belongs in project memory.
+The host-level files `/srv/codex-ops/OPS_CONTEXT.md` and `/srv/codex-ops/RUNBOOK.md` are still used for broad operational context, but project history belongs in project memory.
 
 ## Durable host requests and reminders
 

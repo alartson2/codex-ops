@@ -43,7 +43,8 @@ Recommended base values:
 - `INCIDENTS_DIR=/srv/codex-ops/incidents`
 - `STATE_DIR=/var/lib/codexops/state`
 - `UPLOADS_DIR=/var/lib/codexops/state/uploads`
-- `OPENCLAW_CONTAINER=openclaw-yvrh-openclaw-1`
+- `PROJECTS_DIR=/srv/codex-ops/projects`
+- `DEFAULT_PROJECT=server`
 - `CODEX_CWD=/srv/codex-ops/incidents` as the fallback workspace. Project requests normally run from `/srv/codex-ops/projects/<project>`.
 
 ## Native Codex login (subscription device auth)
@@ -79,6 +80,31 @@ Codex check as service user:
 ```bash
 sudo runuser -u codexops -- env HOME=/var/lib/codexops CODEX_HOME=/var/lib/codexops/.codex codex login status
 ```
+
+## First server setup workflow
+
+After a fresh install, start from the host-level project:
+
+```text
+/project server
+```
+
+Ask Codex to collect server context before creating application-specific projects:
+
+```text
+Collect the initial context for this server: OS, services, Docker state, important paths, available credentials or env files without exposing secrets, deployment constraints, and recommended next steps. Save durable facts into the server project memory.
+```
+
+Use the `server` project to install or bootstrap the target multi-agent system, for example OpenClaw, Hermes, or another application stack. This keeps host discovery, package installation, service setup, DNS, firewall, Docker, and systemd work in the host-level memory bucket.
+
+After the target system exists, create and switch to a dedicated project:
+
+```text
+/project new <project-name>
+/project <project-name>
+```
+
+From there, continue normal setup and operations in that project. Project-specific facts, runbooks, changelog entries, and notes should live in that project memory, not in public repository defaults.
 
 ## Update on an existing VPS
 

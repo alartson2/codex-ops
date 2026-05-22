@@ -36,5 +36,5 @@ Relevant code:
 - Keep repo-visible bot UI strings, prompts, tests, examples, and operational docs in English. Telegram reply language is controlled by runtime configuration such as `ASSISTANT_LANGUAGE`; do not add Russian literals to source files to tune a local operator experience.
 - Never commit real secrets, private keys, tokens, `.env`, or server-only config.
 - Do not overwrite `/etc/codex-ops/bot.env` during deploys.
-- Hostinger runtime currently uses `/opt/codex-ops`, repo mirror `/var/lib/codexops/codex-ops-repo`, state `/var/lib/codexops/state`, and service `codex-telegram-bot.service`.
+- The default runtime layout uses `/opt/codex-ops`, state under `/var/lib/codexops/state`, and service `codex-telegram-bot.service`.
 - Deploy to production only when the user asks for deploy/update.

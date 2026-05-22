@@ -4,10 +4,10 @@
 
 ## Remote multi-agent system development
 
-OpenClaw-based systems often have many moving parts:
+Remote agent systems often have many moving parts:
 
 - agent prompts and profiles
-- wrappers around OpenClaw services
+- wrappers around application services
 - server-side scripts and tools
 - container-local files and logs
 - host-level systemd, Docker, cron, and network state
@@ -34,7 +34,7 @@ In those cases, local development can create false confidence. `codex-ops` keeps
 Telegram becomes the lightweight UI for common server work:
 
 - ask Codex to inspect a service
-- run OpenClaw diagnostics
+- run project diagnostics
 - check current project context
 - switch project context
 - request a runbook or latest incident note
@@ -60,10 +60,10 @@ This helps with work such as:
 
 - large refactors on a VPS project
 - multi-step diagnostics
-- OpenClaw agent setup
+- agent setup
 - deployment audits
 - project changelog or documentation generation from live server context
-- visual debugging from Telegram screenshots, UI captures, terminal screenshots, OpenClaw browser state, or deployment error images
+- visual debugging from Telegram screenshots, UI captures, terminal screenshots, browser state, or deployment error images
 - test-and-fix loops that need multiple commands
 
 Progress updates are explicitly marked as non-final, so the operator can distinguish them from the final report.
@@ -72,7 +72,7 @@ Steering is useful when a long job is still valuable but the operator notices a 
 
 ## Out-of-band incident response
 
-If OpenClaw is unhealthy, an assistant running inside the same application layer may be unavailable or misleading. `codex-ops` runs on the host, outside the OpenClaw container, so it can still:
+If an application runtime is unhealthy, an assistant running inside the same application layer may be unavailable or misleading. `codex-ops` runs on the host, outside the application container, so it can still:
 
 - inspect Docker state
 - read host logs
